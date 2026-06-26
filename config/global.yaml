@@ -1,0 +1,103 @@
+# =============================================================================
+# MatchBot — Global configuration (shared by ALL providers)
+#
+# This file holds everything the legacy system baked into Python classes:
+# the canonical attribute dictionary, standardization maps (gender / suffixes),
+# blocking keys, the matcher chain with weights/thresholds, and DQ rules.
+#
+# Onboarding a new provider does NOT require editing this file — only a new
+# file under providers/. Edit here only to change matching behavior globally
+# or to add a brand-new canonical attribute (also add it to the domain module).
+# =============================================================================
+
+# --- Canonical attribute dictionary -----------------------------------------
+# Must match matchbot.domain.canonical exactly (validated on load).
+canonical_attributes:
+  - { name: first_name,  dtype: string, pii: true }
+  - { name: middle_name, dtype: string, pii: true }
+  - { name: last_name,   dtype: string, pii: true }
+  - { name: birth_date,  dtype: date,   pii: true }
+  - { name: ssn,         dtype: string, pii: true }
+  - { name: gender,      dtype: string, pii: true }
+  - { name: address1,    dtype: string, pii: true }
+  - { name: address2,    dtype: string, pii: true }
+  - { name: city,        dtype: string, pii: false }
+  - { name: state,       dtype: string, pii: false }
+  - { name: zip,         dtype: string, pii: false }
+  - { name: member_external_id, dtype: string, pii: true }  # e.g. RIDE SASID
+
+# --- Standardization (was hardcoded in legacy first_pass / derived_identifiers)
+standardization:
+  gender_map:
+    F: FEMALE
+    FEMALE: FEMALE
+    M: MALE
+    MALE: MALE
+    NB: NONBINARY
+    "X": NONBINARY
+  name_suffixes: [JR, SR, II, III, IV, V, VI, ESQ]
+  name_prefixes: [MR, MRS, MS, DR]
+
+# --- Matching ----------------------------------------------------------------
+matching:
+  # Blocking keys cheaply narrow candidate members before scoring.
+  blocking_keys:
+    - name: external_id_exact
+      attributes: [member_external_id]
+    - name: ssn_exact
+      attributes: [ssn]
+    - name: lastname_dob
+      attributes: [last_name, birth_date]
+      phonetic: [last_name]
+    - name: firstname_lastname_dob
+      attributes: [first_name, last_name, birth_date]
+      phonetic: [first_name, last_name]
+    - name: firstname_lastname
+      attributes: [first_name, last_name]
+      phonetic: [first_name, last_name]
+
+  # Ordered matcher chain. First matcher to ACCEPT wins. A record that no
+  # matcher accepts but some matcher marks reviewable -> AMBIGUOUS (ERROR
+  # table for optional review); otherwise UNMATCHED. No human gate.
+  matchers:
+    # Strong provider-assigned id (e.g. RIDE SASID). Highest precedence.
+    - name: deterministic_external_id
+      type: deterministic
+      keys: [member_external_id]
+
+    - name: deterministic_ssn_dob
+      type: deterministic
+      keys: [ssn, birth_date]
+
+    - name: deterministic_name_dob
+      type: deterministic
+      keys: [first_name, last_name, birth_date]
+
+    - name: fuzzy_identity
+      type: fuzzy
+      accept_threshold: 0.88
+      review_threshold: 0.65
+      comparisons:
+        - { attribute: first_name, method: jaro_winkler, weight: 1.0, threshold: 0.90 }
+        - { attribute: last_name,  method: jaro_winkler, weight: 1.5, threshold: 0.90 }
+        - { attribute: birth_date, method: exact,        weight: 2.0, threshold: 1.00 }
+        - { attribute: ssn,        method: exact,        weight: 2.5, threshold: 1.00 }
+
+    # Name-only fuzzy fallback for providers without SSN/DOB (e.g. RIDE).
+    # Conservative thresholds since name alone is weaker evidence.
+    - name: fuzzy_name
+      type: fuzzy
+      accept_threshold: 0.95
+      review_threshold: 0.80
+      comparisons:
+        - { attribute: first_name,  method: jaro_winkler, weight: 1.0, threshold: 0.92 }
+        - { attribute: last_name,   method: jaro_winkler, weight: 1.5, threshold: 0.92 }
+        - { attribute: middle_name, method: jaro_winkler, weight: 0.5, threshold: 0.90 }
+
+# --- Data-quality rules (evaluated during cleanse; recorded as metrics) ------
+dq_rules:
+  - { name: ssn_present,       attribute: ssn,        rule: not_null, severity: warn }
+  - { name: ssn_format,        attribute: ssn,        rule: regex, pattern: '^\d{9}$', severity: warn }
+  - { name: birth_date_present, attribute: birth_date, rule: not_null, severity: warn }
+  - { name: last_name_present, attribute: last_name,  rule: not_null, severity: error }
+  - { name: state_format,      attribute: state,      rule: length, min_length: 2, max_length: 2, severity: warn }

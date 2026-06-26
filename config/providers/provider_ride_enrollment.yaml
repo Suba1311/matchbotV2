@@ -1,0 +1,42 @@
+# RIDE Enrollment — real provider schema (37-column CSV, college enrollment).
+# This file is the ENTIRE onboarding surface for this provider.
+#
+# Note: this source has NO SSN and NO DOB. The strong person key is SASID,
+# mapped to canonical `member_external_id`. Matching therefore uses the SASID
+# deterministic matcher first, then a conservative name-only fuzzy fallback
+# (see the `matchers:` override below) instead of the SSN/DOB chain.
+provider_id: ride_enrollment
+provider_code: ride
+dataset_name: enrollment
+display_name: "RIDE — College Enrollment"
+format: csv
+file_glob: "ride_enrollment_*.csv"
+delimiter: ","
+has_header: true
+
+column_mappings:            # raw file column      -> canonical attribute
+  FIRSTNAME:   first_name
+  MIDDLENAME:  middle_name
+  LASTNAME:    last_name
+  SASID:       member_external_id
+  SEX:         gender
+  # NAMESUFFIX is intentionally not mapped — there is no canonical suffix
+  # attribute and the name standardizer strips suffixes anyway.
+  # The many enrollment/college/HS columns are intentionally NOT mapped — they
+  # are not identity attributes. Unmapped columns are dropped at the canonical
+  # stage (provenance: source_row_id is still preserved per row).
+
+transforms:
+  first_name:         { type: string, upper: true }
+  middle_name:        { type: string, upper: true }
+  last_name:          { type: string, upper: true }
+  member_external_id: { type: string, trim: true }
+  gender:             { type: string, upper: true }
+
+# RECORDFOUND='Y' rows always have a name; drop rows missing the person key.
+skip_if_null: [last_name, member_external_id]
+
+# Override the global matcher chain: no SSN/DOB in this source.
+matchers:
+  - deterministic_external_id
+  - fuzzy_name

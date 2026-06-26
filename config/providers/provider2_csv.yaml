@@ -1,0 +1,25 @@
+# Provider 2 — CSV.
+provider_id: provider2_unemployment
+display_name: "Provider 2 — Unemployment (CSV)"
+format: csv
+file_glob: "provider2_*.csv"
+delimiter: ","
+has_header: true
+
+column_mappings:
+  FIRST_NAME: first_name
+  LAST_NAME:  last_name
+  DOB:        birth_date
+  SSN:        ssn
+  GENDER:     gender
+  ADDR1:      address1
+  CITY:       city
+  STATE:      state
+  ZIP:        zip
+
+transforms:
+  birth_date: { type: date, format: "%m/%d/%Y" }
+  ssn:        { type: string, zero_pad: 9, strip: ["-"] }
+  state:      { type: string, upper: true }
+
+skip_if_null: [ssn, last_name]
