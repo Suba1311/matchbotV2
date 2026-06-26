@@ -1,0 +1,32 @@
+# Provider 3 — Fixed-width. Column slices declared explicitly.
+provider_id: provider3_health
+display_name: "Provider 3 — Health (Fixed-width)"
+format: fixed_width
+file_glob: "provider3_*.txt"
+
+fixed_width_columns:
+  - { name: FNAME,  start: 0,  length: 20 }
+  - { name: LNAME,  start: 20, length: 25 }
+  - { name: BDATE,  start: 45, length: 8 }   # YYYYMMDD
+  - { name: SSN,    start: 53, length: 9 }
+  - { name: SEX,    start: 62, length: 1 }
+  - { name: CITY,   start: 63, length: 20 }
+  - { name: ST,     start: 83, length: 2 }
+  - { name: ZIPCD,  start: 85, length: 5 }
+
+column_mappings:
+  FNAME: first_name
+  LNAME: last_name
+  BDATE: birth_date
+  SSN:   ssn
+  SEX:   gender
+  CITY:  city
+  ST:    state
+  ZIPCD: zip
+
+transforms:
+  birth_date: { type: date, format: "%Y%m%d" }
+  ssn:        { type: string, zero_pad: 9 }
+  state:      { type: string, upper: true }
+
+skip_if_null: [last_name]
