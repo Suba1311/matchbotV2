@@ -18,6 +18,7 @@ from typing import Any
 
 import polars as pl
 
+from matchbot.config.models import MatcherSpec
 from matchbot.domain.canonical import MATCH_ATTRIBUTE_COLUMNS
 from matchbot.domain.enums import MatchDecision, Stage
 from matchbot.logging_setup import get_logger
@@ -34,6 +35,29 @@ from matchbot.pipeline.base import PipelineContext, StageResult
 log = get_logger(__name__)
 
 
+def _resolve_matcher_chain(
+    provider_matchers: list[str | MatcherSpec],
+    global_specs: list[MatcherSpec],
+) -> list[MatcherSpec]:
+    """Build the ordered matcher chain for a provider.
+
+    Each entry in ``provider_matchers`` is either:
+    - a string  → reference to a global matcher by name (must exist)
+    - MatcherSpec → inline local definition; overrides a global matcher of the
+      same name if one exists, otherwise adds a provider-only matcher
+
+    The returned list preserves the provider's declared order.
+    """
+    global_by_name = {s.name: s for s in global_specs}
+    resolved: list[MatcherSpec] = []
+    for entry in provider_matchers:
+        if isinstance(entry, str):
+            resolved.append(global_by_name[entry])
+        else:
+            resolved.append(entry)
+    return resolved
+
+
 class MatchStage:
     """Block, score, and route staged records to stage updates + target/error."""
 
@@ -44,8 +68,7 @@ class MatchStage:
         keys = g.matching.blocking_keys
 
         if ctx.provider.matchers:
-            wanted = set(ctx.provider.matchers)
-            chosen = [m for m in g.matching.matchers if m.name in wanted]
+            chosen = _resolve_matcher_chain(ctx.provider.matchers, g.matching.matchers)
         else:
             chosen = list(g.matching.matchers)
         matchers = build_matchers(chosen, g.standardization)

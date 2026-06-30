@@ -56,6 +56,12 @@ matching:
       attributes: [first_name, last_name]
       phonetic: [first_name, last_name]
 
+    # Broad phonetic net on last name alone — ensures candidates are found
+    # for name-only providers (e.g. RIDE) even when first name differs.
+    - name: last_name_only
+      attributes: [last_name]
+      phonetic: [last_name]
+
   # Ordered matcher chain. First matcher to ACCEPT wins. A record that no
   # matcher accepts but some matcher marks reviewable -> AMBIGUOUS (ERROR
   # table for optional review); otherwise UNMATCHED. No human gate.
@@ -69,19 +75,23 @@ matching:
       type: deterministic
       keys: [ssn, birth_date]
 
+    # Use standardized name columns so suffixes/prefixes (JR, SR, DR, etc.)
+    # are stripped before exact comparison.
     - name: deterministic_name_dob
       type: deterministic
-      keys: [first_name, last_name, birth_date]
+      keys: [first_name_std, last_name_std, birth_date]
 
+    # Fuzzy: compare standardized names so "SMITH JR" vs "SMITH" scores
+    # correctly instead of failing the per-field threshold.
     - name: fuzzy_identity
       type: fuzzy
       accept_threshold: 0.88
       review_threshold: 0.65
       comparisons:
-        - { attribute: first_name, method: jaro_winkler, weight: 1.0, threshold: 0.90 }
-        - { attribute: last_name,  method: jaro_winkler, weight: 1.5, threshold: 0.90 }
-        - { attribute: birth_date, method: exact,        weight: 2.0, threshold: 1.00 }
-        - { attribute: ssn,        method: exact,        weight: 2.5, threshold: 1.00 }
+        - { attribute: first_name_std, method: jaro_winkler, weight: 1.0, threshold: 0.90 }
+        - { attribute: last_name_std,  method: jaro_winkler, weight: 1.5, threshold: 0.90 }
+        - { attribute: birth_date,     method: exact,        weight: 2.0, threshold: 1.00 }
+        - { attribute: ssn,            method: exact,        weight: 2.5, threshold: 1.00 }
 
     # Name-only fuzzy fallback for providers without SSN/DOB (e.g. RIDE).
     # Conservative thresholds since name alone is weaker evidence.
@@ -90,9 +100,9 @@ matching:
       accept_threshold: 0.95
       review_threshold: 0.80
       comparisons:
-        - { attribute: first_name,  method: jaro_winkler, weight: 1.0, threshold: 0.92 }
-        - { attribute: last_name,   method: jaro_winkler, weight: 1.5, threshold: 0.92 }
-        - { attribute: middle_name, method: jaro_winkler, weight: 0.5, threshold: 0.90 }
+        - { attribute: first_name_std,  method: jaro_winkler, weight: 1.0, threshold: 0.92 }
+        - { attribute: last_name_std,   method: jaro_winkler, weight: 1.5, threshold: 0.92 }
+        - { attribute: middle_name,     method: jaro_winkler, weight: 0.5, threshold: 0.90 }
 
 # --- Data-quality rules (evaluated during cleanse; recorded as metrics) ------
 dq_rules:

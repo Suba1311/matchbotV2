@@ -100,11 +100,15 @@ def seed_members(
     ] = True,
 ) -> None:
     """Load the Member Universe from a CSV (dev/bootstrap helper)."""
+    import io
+
     import polars as pl
 
     settings = _bootstrap()
-    df = pl.read_csv(csv, infer_schema_length=0)
     runtime = get_runtime(settings.runtime)
+    fs = runtime.filesystem()
+    csv_bytes = fs.read_bytes(csv)
+    df = pl.read_csv(io.BytesIO(csv_bytes), infer_schema_length=0)
     with runtime.repository(settings) as repo:
         n = repo.seed_member_universe(df.to_dicts(), replace=replace)
     typer.secho(f"Seeded {n} member(s) into '{settings.db_schema}'.", fg=typer.colors.GREEN)

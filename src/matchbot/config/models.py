@@ -104,7 +104,10 @@ class ProviderConfig(_Strict):
         default_factory=list, description="Required when format = fixed_width."
     )
     # optional per-provider override of the matcher chain (else global default)
-    matchers: list[str] | None = Field(default=None)
+    # Each entry is either a string (reference to a global matcher by name)
+    # or an inline MatcherSpec (provider-local definition, overrides global
+    # matcher of the same name if one exists).
+    matchers: list[str | MatcherSpec] | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_format_requirements(self) -> ProviderConfig:
