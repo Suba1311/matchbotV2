@@ -187,4 +187,8 @@ def _match_attributes(rec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
-    return pl.DataFrame(rows) if rows else pl.DataFrame()
+    # infer_schema_length=None scans all rows: with the default of 100, a column
+    # that's None in every sampled row (e.g. member_id on early unmatched
+    # records) gets inferred as the wrong dtype and then fails to build once a
+    # later row supplies a real int — only surfaces at scale (~1M+ rows).
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()

@@ -2,9 +2,9 @@
 # This file is the ENTIRE onboarding surface for this provider.
 #
 # Note: this source has NO SSN and NO DOB. The strong person key is SASID,
-# mapped to canonical `member_external_id`. Matching therefore uses the SASID
-# deterministic matcher first, then a conservative name-only fuzzy fallback
-# (see the `matchers:` override below) instead of the SSN/DOB chain.
+# mapped to canonical `member_external_id`. Matching is SASID exact-match
+# only (see the `matchers:` override below) — no name/DOB fallback, since
+# SASID is the only attribute RIDE considers authoritative for identity.
 provider_id: ride_enrollment
 provider_code: ride
 dataset_name: enrollment
@@ -33,10 +33,10 @@ transforms:
   member_external_id: { type: string, trim: true }
   gender:             { type: string, upper: true }
 
-# RECORDFOUND='Y' rows always have a name; drop rows missing the person key.
-skip_if_null: [last_name, member_external_id]
+# Only the person key is required to attempt a match; last_name is no longer
+# used for matching, so it's not a gate for whether the row is processed.
+skip_if_null: [member_external_id]
 
-# Override the global matcher chain: no SSN/DOB in this source.
+# Override the global matcher chain: SASID exact match only, no fallback.
 matchers:
   - deterministic_external_id
-  - fuzzy_name
