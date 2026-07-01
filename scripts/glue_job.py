@@ -68,6 +68,8 @@ def _sync_config_from_s3(s3_uri: str, local_dir: Path) -> None:
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
+            if key.endswith("/"):
+                continue  # S3 "folder" placeholder object, not a real file
             relative = key[len(prefix):].lstrip("/")
             if not relative:
                 continue
@@ -78,12 +80,16 @@ def _sync_config_from_s3(s3_uri: str, local_dir: Path) -> None:
 
 def _install_wheel(wheel_s3_uri: str) -> None:
     """Download wheel from S3 and install it with pip."""
-    tmp_wheel = "/tmp/matchbot-latest.whl"
+    # pip validates the wheel filename against PEP 427 (name-version-...-platform.whl),
+    # so the local path must keep the original filename — a renamed "-latest.whl"
+    # is rejected as "not a valid wheel filename" before install is even attempted.
+    wheel_filename = wheel_s3_uri.rsplit("/", 1)[-1]
+    tmp_wheel = f"/tmp/{wheel_filename}"
     print(f"Downloading wheel from {wheel_s3_uri}")
     _download_from_s3(wheel_s3_uri, tmp_wheel)
-    print("Installing wheel...")
+    print("Installing wheel and dependencies...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps", tmp_wheel],
+        [sys.executable, "-m", "pip", "install", "--quiet", f"{tmp_wheel}[aws]"],
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -127,7 +133,7 @@ def main() -> None:
     # Set environment variables
     os.environ["DATABASE_URL"] = database_url
     os.environ["DB_SCHEMA"] = db_schema
-    os.environ["MATCHBOT_RUNTIME"] = "fargate"
+    os.environ["MATCHBOT_RUNTIME"] = "glue"
     os.environ["MATCHBOT_CONFIG_DIR"] = str(tmp_config)
     os.environ["MATCHBOT_LOG_JSON"] = "true"
     os.environ["MATCHBOT_LOG_LEVEL"] = args.get("log_level", "INFO")
