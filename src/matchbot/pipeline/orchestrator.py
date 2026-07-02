@@ -41,14 +41,15 @@ log = get_logger(__name__)
 # source-column set (they are tracking, not file data).
 _PROVENANCE = frozenset({"source_row_id", "provider_id", "run_id"})
 
-# Staged records are matched in fixed-size batches rather than all at once.
-# Materializing an entire 1M+ row file as Python dicts (plus three parallel
-# result lists inside the match stage) was large enough to OOM even an 8 GiB
-# container — see docs/glue-implementation.md / docs/ecs-implementation.md.
-# Batching bounds peak memory to roughly one batch's worth regardless of file
-# size, and each batch's results are written to the DB immediately so a crash
+# Any full-file step that has to materialize rows as Python dicts (LAND write,
+# MATCH) processes in fixed-size batches instead of all at once. Converting an
+# entire 1M+ row frame to Python dicts (plus, for MATCH, three more parallel
+# result lists) was large enough to OOM even an 8 GiB container — see
+# docs/glue-implementation.md / docs/ecs-implementation.md for the incident
+# history. Batching bounds peak memory to roughly one batch's worth regardless
+# of file size; each batch is written to the DB immediately, so a crash
 # partway through only loses the in-flight batch, not already-written ones.
-_MATCH_BATCH_SIZE = 50_000
+_ROW_BATCH_SIZE = 50_000
 
 
 @dataclass(slots=True)
@@ -160,13 +161,21 @@ class Orchestrator:
 
         # LAND — immutable raw archive: dump every source column verbatim.
         # Source columns are the parsed columns minus pipeline provenance.
+        # Batched for the same reason as MATCH below: parsed.to_dicts() on the
+        # full frame (plus write_land's own per-row cleaning pass) held two
+        # more full-size Python-object copies of a 1M+ row file in memory at
+        # once — this was the actual cause of ECS OOMs at 2-8 GiB, since it
+        # runs before cleanse/canonical/stage/match are ever reached (crashes
+        # show up right after "parse.done" with nothing further logged).
         source_columns = [c for c in parsed.columns if c not in _PROVENANCE]
-        landed = self._repo.write_land(
-            pipeline_run_id=pipeline_run_id,
-            provider_code=provider.provider_code,
-            source_columns=source_columns,
-            rows=parsed.to_dicts(),
-        )
+        landed = 0
+        for batch in parsed.iter_slices(n_rows=_ROW_BATCH_SIZE):
+            landed += self._repo.write_land(
+                pipeline_run_id=pipeline_run_id,
+                provider_code=provider.provider_code,
+                source_columns=source_columns,
+                rows=batch.to_dicts(),
+            )
         metrics.rows_landed = landed
 
         # Stage 3 — Map to Canonical.
@@ -181,19 +190,13 @@ class Orchestrator:
         metrics.rows_cleansed = cleansed.height
 
         # STAGE — insert canonical+blocking rows (PENDING), capture stage ids.
-        stage_rows = self._stage_rows(cleansed, provider)
-        stage_ids = self._repo.write_stage(pipeline_run_id, stage_rows)
-        metrics.rows_staged = len(stage_ids)
-
-        # Attach stage ids + pipeline_run_id back onto the frame for matching.
-        staged = cleansed.with_columns(
-            pl.Series("id", stage_ids),
-            pl.lit(pipeline_run_id).alias("pipeline_run_id"),
-        )
-
-        # Stage 4 — Match vs Member Universe; update stage + write target/error.
-        # Member Universe + blocking index + matcher chain are built once for
-        # the whole file, not per batch — only the staged records are chunked.
+        # Batched for the same reason as LAND above: _stage_rows()'s
+        # frame.to_dicts() over the full file, plus write_stage()'s own
+        # per-row cleaning pass, is the same "whole file as Python objects"
+        # risk. STAGE and MATCH are batched together here (not as two
+        # separate passes) since each stage-row batch's returned ids feed
+        # straight into that same batch's match — no reason to write all of
+        # STAGE, rebuild a full staged frame, then re-slice it for MATCH.
         g = ctx.config.global_config
         keys = g.matching.blocking_keys
         if ctx.provider.matchers:
@@ -204,16 +207,31 @@ class Orchestrator:
         members = self._repo.load_member_universe()
         index = blocking.index_members(members, keys)
 
-        with metrics.time_stage(Stage.MATCH, rows_in=staged.height) as box:
-            matched_count = 0
-            match_stage = MatchStage()
-            for batch in staged.iter_slices(n_rows=_MATCH_BATCH_SIZE):
+        # STAGE-row writes happen inline within this timed MATCH block (not
+        # under a separate Stage.STAGE timing) — same as before this change,
+        # where the STAGE write sat between the CLEANSE and MATCH timers,
+        # untimed on its own. Only the batching is new; the timing contract
+        # (stage_timings covers parse/canonical/cleanse/match) is unchanged.
+        rows_staged = 0
+        matched_count = 0
+        match_stage = MatchStage()
+        with metrics.time_stage(Stage.MATCH, rows_in=cleansed.height) as match_box:
+            for chunk in cleansed.iter_slices(n_rows=_ROW_BATCH_SIZE):
+                stage_rows = self._stage_rows(chunk, provider)
+                stage_ids = self._repo.write_stage(pipeline_run_id, stage_rows)
+                rows_staged += len(stage_ids)
+
+                batch = chunk.with_columns(
+                    pl.Series("id", stage_ids),
+                    pl.lit(pipeline_run_id).alias("pipeline_run_id"),
+                )
                 result = match_stage.run(ctx, batch, members, index, matchers, keys)
                 self._repo.update_stage_matches(result.side_outputs["stage_updates"])
                 self._repo.write_target(result.side_outputs["target"])
                 self._repo.write_error(result.side_outputs["error"])
                 matched_count += len(result.side_outputs["target"])
-            box[0] = matched_count
+            match_box[0] = matched_count
+        metrics.rows_staged = rows_staged
 
     @staticmethod
     def _stage_rows(frame: pl.DataFrame, provider: ProviderConfig) -> list[dict[str, Any]]:
