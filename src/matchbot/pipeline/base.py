@@ -12,7 +12,7 @@ add/reorder/replace:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import polars as pl
 
@@ -40,14 +40,18 @@ class PipelineContext:
 
 @dataclass(slots=True)
 class StageResult:
-    """A stage's output: the primary frame plus optional named side frames.
+    """A stage's output: the primary frame plus optional named side outputs.
 
     The match stage uses ``side_outputs`` to return the TARGET and ERROR splits
-    without forcing every other stage to know those concepts exist.
+    without forcing every other stage to know those concepts exist. Match's
+    side outputs are plain ``list[dict]`` (row batches ready for the
+    repository's write methods, which only ever wanted ``Sequence[Mapping]``)
+    rather than ``pl.DataFrame`` — converting to/from Polars there was a
+    needless round-trip that also drove excessive memory use at scale.
     """
 
     frame: pl.DataFrame
-    side_outputs: dict[str, pl.DataFrame] = field(default_factory=dict)
+    side_outputs: dict[str, pl.DataFrame | list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @runtime_checkable

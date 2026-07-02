@@ -14,16 +14,14 @@ human gate: AMBIGUOUS -> LOW_CONFIDENCE in the error table for optional review.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
-from matchbot.config.models import MatcherSpec
 from matchbot.domain.canonical import MATCH_ATTRIBUTE_COLUMNS
 from matchbot.domain.enums import MatchDecision, Stage
 from matchbot.logging_setup import get_logger
 from matchbot.matching import blocking
-from matchbot.matching.base import build_matchers
 from matchbot.matching.vocab import (
     STATUS_LOW_CONFIDENCE,
     STATUS_MATCHED,
@@ -32,10 +30,14 @@ from matchbot.matching.vocab import (
 )
 from matchbot.pipeline.base import PipelineContext, StageResult
 
+if TYPE_CHECKING:
+    from matchbot.config.models import BlockingKey, MatcherSpec
+    from matchbot.matching.base import Matcher
+
 log = get_logger(__name__)
 
 
-def _resolve_matcher_chain(
+def resolve_matcher_chain(
     provider_matchers: list[str | MatcherSpec],
     global_specs: list[MatcherSpec],
 ) -> list[MatcherSpec]:
@@ -46,7 +48,9 @@ def _resolve_matcher_chain(
     - MatcherSpec → inline local definition; overrides a global matcher of the
       same name if one exists, otherwise adds a provider-only matcher
 
-    The returned list preserves the provider's declared order.
+    The returned list preserves the provider's declared order. Called once per
+    run by the orchestrator (not per batch) since the resolved chain is the
+    same for every batch of a given provider's file.
     """
     global_by_name = {s.name: s for s in global_specs}
     resolved: list[MatcherSpec] = []
@@ -59,23 +63,29 @@ def _resolve_matcher_chain(
 
 
 class MatchStage:
-    """Block, score, and route staged records to stage updates + target/error."""
+    """Block, score, and route staged records to stage updates + target/error.
+
+    Runs against one batch of staged records at a time — the caller (the
+    orchestrator) is responsible for chunking a large staged frame and for
+    loading/indexing the Member Universe once, up front, rather than per
+    batch. This keeps peak memory bounded by batch size instead of file size:
+    at 1M+ staged rows, materializing the whole file as Python dicts plus
+    three parallel result lists (stage_updates/target/error) was large enough
+    to OOM even an 8 GiB container — see docs/glue-implementation.md and
+    docs/ecs-implementation.md for the incident history.
+    """
 
     stage = Stage.MATCH
 
-    def run(self, ctx: PipelineContext, frame: pl.DataFrame) -> StageResult:
-        g = ctx.config.global_config
-        keys = g.matching.blocking_keys
-
-        if ctx.provider.matchers:
-            chosen = _resolve_matcher_chain(ctx.provider.matchers, g.matching.matchers)
-        else:
-            chosen = list(g.matching.matchers)
-        matchers = build_matchers(chosen, g.standardization)
-
-        members = ctx.repository.load_member_universe()
-        index = blocking.index_members(members, keys)
-
+    def run(
+        self,
+        ctx: PipelineContext,
+        frame: pl.DataFrame,
+        members: list[dict[str, Any]],
+        index: dict[str, list[int]],
+        matchers: list[Matcher],
+        keys: list[BlockingKey],
+    ) -> StageResult:
         records = frame.to_dicts()
         stage_updates: list[dict[str, Any]] = []
         target_rows: list[dict[str, Any]] = []
@@ -141,27 +151,29 @@ class MatchStage:
                     }
                 )
 
-        ctx.metrics.rows_matched = len(target_rows)
-        ctx.metrics.rows_ambiguous = sum(
-            1 for r in error_rows if r["decision"] == STATUS_LOW_CONFIDENCE
-        )
-        ctx.metrics.rows_unmatched = len(error_rows) - ctx.metrics.rows_ambiguous
+        # += not = : this runs once per batch, so the orchestrator's totals
+        # must accumulate across calls rather than being overwritten each time.
+        batch_ambiguous = sum(1 for r in error_rows if r["decision"] == STATUS_LOW_CONFIDENCE)
+        batch_unmatched = len(error_rows) - batch_ambiguous
+        ctx.metrics.rows_matched += len(target_rows)
+        ctx.metrics.rows_ambiguous += batch_ambiguous
+        ctx.metrics.rows_unmatched += batch_unmatched
 
         log.info(
-            "match.done",
+            "match.batch_done",
             staged=len(records),
             matched=len(target_rows),
-            unmatched=ctx.metrics.rows_unmatched,
-            ambiguous=ctx.metrics.rows_ambiguous,
+            unmatched=batch_unmatched,
+            ambiguous=batch_ambiguous,
             candidates_indexed=len(members),
         )
 
         return StageResult(
             frame=frame,
             side_outputs={
-                "stage_updates": _frame(stage_updates),
-                "target": _frame(target_rows),
-                "error": _frame(error_rows),
+                "stage_updates": stage_updates,
+                "target": target_rows,
+                "error": error_rows,
             },
         )
 
@@ -184,11 +196,3 @@ def _match_attributes(rec: dict[str, Any]) -> dict[str, Any]:
     that were present when the match failed) without joining back to stage.
     """
     return {col: rec.get(col) for col in MATCH_ATTRIBUTE_COLUMNS}
-
-
-def _frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
-    # infer_schema_length=None scans all rows: with the default of 100, a column
-    # that's None in every sampled row (e.g. member_id on early unmatched
-    # records) gets inferred as the wrong dtype and then fails to build once a
-    # later row supplies a real int — only surfaces at scale (~1M+ rows).
-    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()

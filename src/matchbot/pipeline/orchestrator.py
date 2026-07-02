@@ -20,10 +20,12 @@ import polars as pl
 from matchbot.audit.metrics import RunMetrics
 from matchbot.domain.enums import RunStatus, Stage
 from matchbot.logging_setup import bind_run, get_logger
+from matchbot.matching import blocking
+from matchbot.matching.base import build_matchers
 from matchbot.pipeline.base import PipelineContext
 from matchbot.pipeline.canonical import CanonicalStage
 from matchbot.pipeline.cleanse import CleanseStage
-from matchbot.pipeline.match import MatchStage
+from matchbot.pipeline.match import MatchStage, resolve_matcher_chain
 from matchbot.pipeline.parse import ParseStage
 
 if TYPE_CHECKING:
@@ -38,6 +40,15 @@ log = get_logger(__name__)
 # Provenance columns the parse stage attaches; excluded from the raw LAND dump's
 # source-column set (they are tracking, not file data).
 _PROVENANCE = frozenset({"source_row_id", "provider_id", "run_id"})
+
+# Staged records are matched in fixed-size batches rather than all at once.
+# Materializing an entire 1M+ row file as Python dicts (plus three parallel
+# result lists inside the match stage) was large enough to OOM even an 8 GiB
+# container — see docs/glue-implementation.md / docs/ecs-implementation.md.
+# Batching bounds peak memory to roughly one batch's worth regardless of file
+# size, and each batch's results are written to the DB immediately so a crash
+# partway through only loses the in-flight batch, not already-written ones.
+_MATCH_BATCH_SIZE = 50_000
 
 
 @dataclass(slots=True)
@@ -181,13 +192,28 @@ class Orchestrator:
         )
 
         # Stage 4 — Match vs Member Universe; update stage + write target/error.
-        with metrics.time_stage(Stage.MATCH, rows_in=staged.height) as box:
-            result = MatchStage().run(ctx, staged)
-            box[0] = result.side_outputs["target"].height
+        # Member Universe + blocking index + matcher chain are built once for
+        # the whole file, not per batch — only the staged records are chunked.
+        g = ctx.config.global_config
+        keys = g.matching.blocking_keys
+        if ctx.provider.matchers:
+            chosen = resolve_matcher_chain(ctx.provider.matchers, g.matching.matchers)
+        else:
+            chosen = list(g.matching.matchers)
+        matchers = build_matchers(chosen, g.standardization)
+        members = self._repo.load_member_universe()
+        index = blocking.index_members(members, keys)
 
-        self._repo.update_stage_matches(result.side_outputs["stage_updates"].to_dicts())
-        self._repo.write_target(result.side_outputs["target"].to_dicts())
-        self._repo.write_error(result.side_outputs["error"].to_dicts())
+        with metrics.time_stage(Stage.MATCH, rows_in=staged.height) as box:
+            matched_count = 0
+            match_stage = MatchStage()
+            for batch in staged.iter_slices(n_rows=_MATCH_BATCH_SIZE):
+                result = match_stage.run(ctx, batch, members, index, matchers, keys)
+                self._repo.update_stage_matches(result.side_outputs["stage_updates"])
+                self._repo.write_target(result.side_outputs["target"])
+                self._repo.write_error(result.side_outputs["error"])
+                matched_count += len(result.side_outputs["target"])
+            box[0] = matched_count
 
     @staticmethod
     def _stage_rows(frame: pl.DataFrame, provider: ProviderConfig) -> list[dict[str, Any]]:
