@@ -71,6 +71,29 @@ class Settings(BaseSettings):
         description="Emit JSON logs (prod) vs. human-readable console (dev).",
     )
 
+    # --- Notifications --------------------------------------------------------
+    notifier: str = Field(
+        default="log",
+        alias="MATCHBOT_NOTIFIER",
+        description="Run-completion notifier: log | ses.",
+    )
+    ses_sender: str | None = Field(
+        default=None,
+        alias="MATCHBOT_SES_SENDER",
+        description="Verified SES sender address. Required when notifier=ses.",
+    )
+    ses_recipients: str | None = Field(
+        default=None,
+        alias="MATCHBOT_SES_RECIPIENTS",
+        description="Comma-separated recipient addresses. Required when notifier=ses.",
+    )
+    aws_region: str | None = Field(
+        default=None,
+        alias="AWS_REGION",
+        description="Region for the SES client. Defaults to boto3's own resolution "
+        "(env/instance metadata) when unset.",
+    )
+
     @field_validator("log_level")
     @classmethod
     def _upper_log_level(cls, v: str) -> str:
