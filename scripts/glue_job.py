@@ -138,6 +138,16 @@ def main() -> None:
     os.environ["MATCHBOT_LOG_JSON"] = "true"
     os.environ["MATCHBOT_LOG_LEVEL"] = args.get("log_level", "INFO")
 
+    # Optional: email a run-completion summary via SES instead of just
+    # logging it. Pass --notifier ses --ses_sender ... --ses_recipients ...
+    # as Glue job parameters to enable; defaults to log-only, unchanged.
+    if "notifier" in args:
+        os.environ["MATCHBOT_NOTIFIER"] = args["notifier"]
+    if "ses_sender" in args:
+        os.environ["MATCHBOT_SES_SENDER"] = args["ses_sender"]
+    if "ses_recipients" in args:
+        os.environ["MATCHBOT_SES_RECIPIENTS"] = args["ses_recipients"]
+
     from matchbot.config.settings import get_settings
     from matchbot.logging_setup import configure_logging
     from matchbot.runtime.factory import get_runtime
@@ -169,7 +179,7 @@ def main() -> None:
 
     elif command == "run":
         from matchbot.config.loader import ConfigError, load_config
-        from matchbot.notify.base import LogNotifier
+        from matchbot.notify.factory import get_notifier
         from matchbot.pipeline.orchestrator import Orchestrator
 
         provider = args.get("provider", "")
@@ -185,8 +195,9 @@ def main() -> None:
             sys.exit(2)
 
         fs = runtime.filesystem()
+        notifier = get_notifier(settings)
         with runtime.repository(settings) as repo:
-            orch = Orchestrator(config, settings, repo, fs, LogNotifier())
+            orch = Orchestrator(config, settings, repo, fs, notifier)
             results = orch.run_provider(provider, input_uri)
 
         for r in results:

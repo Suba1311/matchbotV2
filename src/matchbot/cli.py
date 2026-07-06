@@ -18,7 +18,7 @@ import typer
 from matchbot.config.loader import ConfigError, load_config
 from matchbot.config.settings import Settings, get_settings
 from matchbot.logging_setup import configure_logging, get_logger
-from matchbot.notify.base import LogNotifier
+from matchbot.notify.factory import get_notifier
 from matchbot.runtime.factory import get_runtime
 
 app = typer.Typer(
@@ -55,9 +55,10 @@ def run(
 
     runtime = get_runtime(settings.runtime)
     fs = runtime.filesystem()
+    notifier = get_notifier(settings)
     failures = 0
     with runtime.repository(settings) as repo:
-        orch = Orchestrator(config, settings, repo, fs, LogNotifier())
+        orch = Orchestrator(config, settings, repo, fs, notifier)
         try:
             results = orch.run_provider(provider, input)
         except Exception as exc:
