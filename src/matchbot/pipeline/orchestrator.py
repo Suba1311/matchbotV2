@@ -152,12 +152,29 @@ class Orchestrator:
         empty = pl.DataFrame()
         provider = ctx.provider
 
-        # Stage 1 — Parse (RECEIVED = rows read).
+        # Stage 1 — Parse. rows_received is the total lines read from the
+        # source file — clean + rejected — so it reflects the file's actual
+        # size regardless of how many rows made it past parsing.
         raw = self._fs.read_bytes(source_uri)
         with metrics.time_stage(Stage.PARSE, rows_in=0) as box:
-            parsed = ParseStage(raw).run(ctx, empty).frame
+            parse_result = ParseStage(raw).run(ctx, empty)
+            parsed = parse_result.frame
             box[0] = parsed.height
-        metrics.rows_received = parsed.height
+
+        # Rows ParseStage couldn't cleanly parse (field-count mismatch) — kept
+        # verbatim for DQ investigation, never fed into LAND/STAGE/matching.
+        # Distinct from rows_skipped (cleanse-stage skip_if_null drops): these
+        # never had valid shape to evaluate a skip rule against in the first
+        # place.
+        land_rejects = parse_result.side_outputs.get("land_rejects") or []
+        metrics.rows_rejected = len(land_rejects)
+        metrics.rows_received = parsed.height + len(land_rejects)
+        if land_rejects:
+            self._repo.write_land_rejects(
+                pipeline_run_id=pipeline_run_id,
+                provider_code=provider.provider_code,
+                rows=land_rejects,
+            )
 
         # LAND — immutable raw archive: dump every source column verbatim.
         # Source columns are the parsed columns minus pipeline provenance.
@@ -205,8 +222,8 @@ class Orchestrator:
             chosen = list(g.matching.matchers)
         matchers = build_matchers(chosen, g.standardization)
         metrics.matched_on = matched_on_attributes(chosen)
-        members = self._repo.load_member_universe()
-        index = blocking.index_members(members, keys)
+        candidates = self._repo.load_reference()
+        index = blocking.index_members(candidates, keys)
 
         # STAGE-row writes happen inline within this timed MATCH block (not
         # under a separate Stage.STAGE timing) — same as before this change,
@@ -226,7 +243,7 @@ class Orchestrator:
                     pl.Series("id", stage_ids),
                     pl.lit(pipeline_run_id).alias("pipeline_run_id"),
                 )
-                result = match_stage.run(ctx, batch, members, index, matchers, keys)
+                result = match_stage.run(ctx, batch, candidates, index, matchers, keys)
                 self._repo.update_stage_matches(result.side_outputs["stage_updates"])
                 self._repo.write_target(result.side_outputs["target"])
                 self._repo.write_error(result.side_outputs["error"])

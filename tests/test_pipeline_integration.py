@@ -72,7 +72,7 @@ def test_full_pipeline_routes_and_audits(
     assert len(repo.stage) == 3
     assert len(repo.target) == 2
     assert len(repo.error) == 1
-    assert {r["member_id"] for r in repo.target} == {1, 2}
+    assert {r["idcol_id"] for r in repo.target} == {1, 2}
     assert all(r["match_method"] == "EXACT" or "EXACT" in r["match_method"] for r in repo.target)
     assert repo.error[0]["decision"] == "NO_MATCH"
 

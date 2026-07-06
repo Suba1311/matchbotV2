@@ -56,7 +56,7 @@ uv run matchbot run --provider provider2_unemployment --input data/samples/
 Commands: `run`, `init-db`, `seed-members`, `validate-config`, `list-providers`.
 Set `MATCHBOT_LOG_JSON=true` for JSON logs (prod / CloudWatch); the run summary
 line carries counts, per-stage timings, match rate, and DQ metrics — the same
-data persisted to the `audit_run` table.
+data persisted to the `rilds_audit` table.
 ```
 
 ## Onboarding

@@ -53,7 +53,7 @@ class DeterministicMatcher:
                 return MatchOutcome(
                     decision=MatchDecision.MATCHED,
                     method=MatchMethod.DETERMINISTIC,
-                    member_id=_member_key(cand),
+                    idcol_id=_member_key(cand),
                     score=1.0,
                     reason=f"{self.name}: exact match on {'+'.join(self.keys)}",
                 )

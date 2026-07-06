@@ -91,7 +91,7 @@ class PostgresRepository(Repository):
         self, *, run_uid: str, provider_code: str, dataset_name: str, runtime: str,
         source_uri: str,
     ) -> int:
-        table = self._t["pipeline_runs"]
+        table = self._t["rilds_audit"]
         with self._engine.begin() as conn:
             conn.execute(search_path_sql(self._schema))
             result = conn.execute(
@@ -111,7 +111,7 @@ class PostgresRepository(Repository):
         return run_id
 
     def finalize_run(self, pipeline_run_id: int, metrics: RunMetrics) -> None:
-        table = self._t["pipeline_runs"]
+        table = self._t["rilds_audit"]
         m = metrics.to_dict()
         with self._engine.begin() as conn:
             conn.execute(search_path_sql(self._schema))
@@ -123,6 +123,7 @@ class PostgresRepository(Repository):
                     duration_seconds=m["duration_seconds"],
                     match_rate=m["match_rate"],
                     rows_received=m["rows_received"],
+                    rows_rejected=m["rows_rejected"],
                     rows_cleansed=m["rows_cleansed"],
                     rows_landed=m["rows_landed"],
                     rows_staged=m["rows_staged"],
@@ -166,13 +167,39 @@ class PostgresRepository(Repository):
         log.info("land.written", table=land.name, count=len(cleaned))
         return len(cleaned)
 
+    def write_land_rejects(
+        self, *, pipeline_run_id: int, provider_code: str, rows: Sequence[Mapping[str, Any]],
+    ) -> int:
+        """Persist raw lines ParseStage couldn't cleanly parse, verbatim.
+
+        Each row must have ``raw_line`` and ``reason``; unlike the per-provider
+        land table, this is one fixed-shape table shared by every provider.
+        """
+        if not rows:
+            return 0
+        table = self._t["rilds_land_rejects"]
+        cleaned = [
+            {
+                "pipeline_run_id": pipeline_run_id,
+                "provider_code": provider_code,
+                "raw_line": r["raw_line"],
+                "reason": r["reason"],
+            }
+            for r in rows
+        ]
+        with self._engine.begin() as conn:
+            conn.execute(search_path_sql(self._schema))
+            conn.execute(insert(table), cleaned)
+        log.info("land_rejects.written", count=len(cleaned))
+        return len(cleaned)
+
     # --- stage --------------------------------------------------------------
     def write_stage(
         self, pipeline_run_id: int, rows: Sequence[Mapping[str, Any]]
     ) -> list[int]:
         if not rows:
             return []
-        table = self._t["stage"]
+        table = self._t["rilds_stage"]
         valid = set(table.columns.keys())
         cleaned = [
             {**{k: v for k, v in r.items() if k in valid}, "pipeline_run_id": pipeline_run_id}
@@ -188,12 +215,12 @@ class PostgresRepository(Repository):
     def update_stage_matches(self, updates: Sequence[Mapping[str, Any]]) -> int:
         if not updates:
             return 0
-        table = self._t["stage"]
+        table = self._t["rilds_stage"]
         # 'id' is reserved as a bind name in UPDATE; bind the key on 'b_id'.
         params = [
             {
                 "b_id": u["id"],
-                "member_id": u.get("member_id"),
+                "idcol_id": u.get("idcol_id"),
                 "match_score": u.get("match_score"),
                 "match_status": u.get("match_status"),
             }
@@ -203,7 +230,7 @@ class PostgresRepository(Repository):
             update(table)
             .where(table.c.id == bindparam("b_id"))
             .values(
-                member_id=bindparam("member_id"),
+                idcol_id=bindparam("idcol_id"),
                 match_score=bindparam("match_score"),
                 match_status=bindparam("match_status"),
             )
@@ -214,7 +241,38 @@ class PostgresRepository(Repository):
         log.info("stage.matches_updated", count=len(params))
         return len(params)
 
-    # --- member universe ----------------------------------------------------
+    # --- rilds_reference (active matching source) ---------------------------
+    def load_reference(self) -> list[dict[str, Any]]:
+        """Load candidate rows from ``rilds_reference`` for matching.
+
+        ``rilds_reference`` is populated externally (not by this pipeline —
+        see person_pii_reference_temp_tables.md) and is read-only here, same
+        as ``load_member_universe`` was. Its own column names
+        (``first_name_metaphone1``/``last_name_metaphone1``/``idcol_id``) are
+        the source of truth and match STAGE's derived columns directly — no
+        aliasing needed there. ``sasid`` is exposed additionally as
+        ``member_external_id`` since that's the canonical attribute name the
+        matcher chain (``deterministic_external_id``) is configured against.
+
+        Deliberately uses ``self._engine`` (the main connection), not
+        ``self._mu_engine`` — that engine follows ``MEMBER_UNIVERSE_URL``,
+        which is a setting specific to the legacy ``member_universe`` table's
+        optional separate database. ``rilds_reference`` has no such setting
+        and should never silently follow it.
+        """
+        table = self._t["rilds_reference"]
+        with self._engine.connect() as conn:
+            conn.execute(search_path_sql(self._schema))
+            rows = conn.execute(select(table)).mappings().all()
+        candidates = []
+        for r in rows:
+            d = self._coerce(dict(r))
+            d["member_external_id"] = d.get("sasid")
+            candidates.append(d)
+        log.info("rilds_reference.loaded", count=len(candidates))
+        return candidates
+
+    # --- member universe (legacy, superseded by rilds_reference) ------------
     def load_member_universe(self) -> list[dict[str, Any]]:
         table = self._t["member_universe"]
         with self._mu_engine.connect() as conn:
@@ -264,10 +322,10 @@ class PostgresRepository(Repository):
 
     # --- target / error -----------------------------------------------------
     def write_target(self, rows: Sequence[Mapping[str, Any]]) -> int:
-        return self._bulk_insert("target", rows)
+        return self._bulk_insert("rilds_matched", rows)
 
     def write_error(self, rows: Sequence[Mapping[str, Any]]) -> int:
-        return self._bulk_insert("error", rows)
+        return self._bulk_insert("rilds_error", rows)
 
     # --- helpers ------------------------------------------------------------
     def _bulk_insert(self, table_name: str, rows: Sequence[Mapping[str, Any]]) -> int:

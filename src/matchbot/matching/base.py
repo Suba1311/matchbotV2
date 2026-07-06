@@ -1,7 +1,7 @@
 """Matcher protocol, outcome type, and registry.
 
 A matcher takes a single staged record (as a dict of canonical attributes) plus
-the candidate Member Universe rows surfaced by blocking, and returns a
+the candidate rows from ``rilds_reference`` surfaced by blocking, and returns a
 :class:`MatchOutcome`. Matchers are registered by ``type`` name so the chain is
 assembled purely from config — adding a new matcher type is a new class +
 ``@register_matcher``, never an edit to the orchestrator.
@@ -26,7 +26,7 @@ class MatchOutcome:
 
     decision: MatchDecision
     method: MatchMethod
-    member_id: str | None = None
+    idcol_id: str | None = None
     score: float = 0.0
     reason: str = ""
     matcher_name: str = ""
@@ -37,12 +37,16 @@ NO_MATCH = MatchOutcome(MatchDecision.UNMATCHED, MatchMethod.NONE, None, 0.0, ""
 
 
 def member_key(candidate: Mapping[str, Any]) -> str | None:
-    """Return a candidate member's primary key as a string.
+    """Return a candidate's primary key as a string.
 
-    Reads ``id`` (the member_universe PK) first, falling back to ``member_id``
-    so in-memory/test repositories using string member ids still work.
+    Reads ``idcol_id`` (the ``rilds_reference`` PK — the active matching
+    source) first, falling back to ``id`` (the legacy ``member_universe`` PK)
+    so that path still works, then ``member_id`` for in-memory/test
+    repositories using string keys directly.
     """
-    pk = candidate.get("id")
+    pk = candidate.get("idcol_id")
+    if pk is None:
+        pk = candidate.get("id")
     if pk is None:
         pk = candidate.get("member_id")
     return None if pk is None else str(pk)

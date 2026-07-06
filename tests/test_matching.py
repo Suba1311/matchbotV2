@@ -35,7 +35,7 @@ def test_deterministic_ssn_dob_match(
     out = _run_chain(app_config, rec, members)
     assert out is not None
     assert out.decision is MatchDecision.MATCHED
-    assert out.member_id == "1"
+    assert out.idcol_id == "1"
     assert out.score == 1.0
 
 

@@ -9,9 +9,9 @@ The run lifecycle the orchestrator drives:
     pipeline_run_id = begin_run(...)
     write_land(...)                       # raw cleansed rows, full fidelity
     stage_ids = write_stage(...)          # canonical + blocking cols, PENDING
-    members   = load_member_universe()
+    candidates = load_reference()         # rilds_reference — the matching source
     ... match in Python ...
-    update_stage_matches(...)             # set member_id/score/status in place
+    update_stage_matches(...)             # set idcol_id/score/status in place
     write_target(...) / write_error(...)
     finalize_run(metrics)                 # write the run-log row
 """
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 class Repository(ABC):
-    """Persistence boundary for land/stage/member-universe/target/error/run-log."""
+    """Persistence boundary for land/stage/reference/target/error/run-log."""
 
     @abstractmethod
     def init_schema(self) -> None:
@@ -39,7 +39,7 @@ class Repository(ABC):
         self, *, run_uid: str, provider_code: str, dataset_name: str, runtime: str,
         source_uri: str,
     ) -> int:
-        """Insert a pipeline_runs row and return its integer pipeline_run_id."""
+        """Insert a rilds_audit row and return its integer pipeline_run_id."""
 
     @abstractmethod
     def write_land(
@@ -57,6 +57,15 @@ class Repository(ABC):
         """
 
     @abstractmethod
+    def write_land_rejects(
+        self, *, pipeline_run_id: int, provider_code: str, rows: Sequence[Mapping[str, Any]],
+    ) -> int:
+        """Persist raw lines ParseStage couldn't cleanly parse, verbatim.
+
+        Each row must have ``raw_line`` (the original text) and ``reason``.
+        """
+
+    @abstractmethod
     def write_stage(
         self, pipeline_run_id: int, rows: Sequence[Mapping[str, Any]]
     ) -> list[int]:
@@ -64,14 +73,22 @@ class Repository(ABC):
 
     @abstractmethod
     def update_stage_matches(self, updates: Sequence[Mapping[str, Any]]) -> int:
-        """Update stage rows in place with member_id/match_score/match_status.
+        """Update stage rows in place with idcol_id/match_score/match_status.
 
         Each update dict must include ``id`` (the stage id) plus the fields to set.
         """
 
     @abstractmethod
+    def load_reference(self) -> list[dict[str, Any]]:
+        """Return the rilds_reference rows (read-only, populated externally).
+
+        The active matching source — see person_pii_reference_temp_tables.md.
+        """
+
+    @abstractmethod
     def load_member_universe(self) -> list[dict[str, Any]]:
-        """Return the authoritative member rows (read-only reference)."""
+        """Return the legacy member_universe rows (read-only, superseded by
+        load_reference; kept for now but not called by the pipeline)."""
 
     @abstractmethod
     def seed_member_universe(
@@ -81,7 +98,7 @@ class Repository(ABC):
 
     @abstractmethod
     def write_target(self, rows: Sequence[Mapping[str, Any]]) -> int:
-        """Persist matched rows (stage_id, member_id, score, method)."""
+        """Persist matched rows (stage_id, idcol_id, score, method)."""
 
     @abstractmethod
     def write_error(self, rows: Sequence[Mapping[str, Any]]) -> int:
@@ -89,7 +106,7 @@ class Repository(ABC):
 
     @abstractmethod
     def finalize_run(self, pipeline_run_id: int, metrics: RunMetrics) -> None:
-        """Update the pipeline_runs row with final counts/timings/status."""
+        """Update the rilds_audit row with final counts/timings/status."""
 
     @abstractmethod
     def close(self) -> None:

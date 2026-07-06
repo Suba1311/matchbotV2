@@ -1,11 +1,11 @@
-"""Stage 4 — Match vs Member Universe.
+"""Stage 4 — Match vs the rilds_reference identity reference.
 
 Operates on the STAGE frame (each row already carries its integer ``id`` from
-the stage insert). Builds a blocking index over the Member Universe, runs each
+the stage insert). Builds a blocking index over ``rilds_reference``, runs each
 staged record through the configured matcher chain, and produces three outputs:
 
-* ``stage_updates`` — in-place updates to stage rows (member_id/score/status).
-* ``target``        — matched rows (stage_id, member_id, score, method).
+* ``stage_updates`` — in-place updates to stage rows (idcol_id/score/status).
+* ``target``        — matched rows (stage_id, idcol_id, score, method).
 * ``error``         — unmatched / low-confidence rows (stage_id, decision, reason).
 
 The first matcher to reach a terminal decision (MATCHED or AMBIGUOUS) wins. No
@@ -106,8 +106,8 @@ class MatchStage:
 
     Runs against one batch of staged records at a time — the caller (the
     orchestrator) is responsible for chunking a large staged frame and for
-    loading/indexing the Member Universe once, up front, rather than per
-    batch. This keeps peak memory bounded by batch size instead of file size:
+    loading/indexing rilds_reference once, up front, rather than per batch.
+    This keeps peak memory bounded by batch size instead of file size:
     at 1M+ staged rows, materializing the whole file as Python dicts plus
     three parallel result lists (stage_updates/target/error) was large enough
     to OOM even an 8 GiB container — see docs/glue-implementation.md and
@@ -120,7 +120,7 @@ class MatchStage:
         self,
         ctx: PipelineContext,
         frame: pl.DataFrame,
-        members: list[dict[str, Any]],
+        reference_rows: list[dict[str, Any]],
         index: dict[str, list[int]],
         matchers: list[Matcher],
         keys: list[BlockingKey],
@@ -133,7 +133,7 @@ class MatchStage:
         for rec in records:
             stage_id = rec.get("id")
             cand_idx = blocking.candidate_indices(rec, keys, index)
-            candidates = [members[i] for i in cand_idx]
+            candidates = [reference_rows[i] for i in cand_idx]
 
             outcome = None
             matcher_name = ""
@@ -145,11 +145,11 @@ class MatchStage:
                     break
 
             if outcome is not None and outcome.decision is MatchDecision.MATCHED:
-                member_id = self._member_pk(outcome.member_id)
+                idcol_id = self._reference_pk(outcome.idcol_id)
                 stage_updates.append(
                     {
                         "id": stage_id,
-                        "member_id": member_id,
+                        "idcol_id": idcol_id,
                         "match_score": outcome.score,
                         "match_status": STATUS_MATCHED,
                     }
@@ -158,7 +158,7 @@ class MatchStage:
                     {
                         "pipeline_run_id": rec.get("pipeline_run_id"),
                         "stage_id": stage_id,
-                        "member_id": member_id,
+                        "idcol_id": idcol_id,
                         "match_score": outcome.score,
                         "match_method": method_to_db(outcome.method, matcher_name),
                         **_match_attributes(rec),
@@ -174,7 +174,7 @@ class MatchStage:
                 stage_updates.append(
                     {
                         "id": stage_id,
-                        "member_id": None,
+                        "idcol_id": None,
                         "match_score": outcome.score if outcome else 0.0,
                         "match_status": status,
                     }
@@ -204,7 +204,7 @@ class MatchStage:
             staged=len(records),
             matched=len(target_rows),
             unmatched=len(error_rows),
-            candidates_indexed=len(members),
+            candidates_indexed=len(reference_rows),
         )
 
         return StageResult(
@@ -217,12 +217,12 @@ class MatchStage:
         )
 
     @staticmethod
-    def _member_pk(member_id: str | None) -> int | None:
-        """Member id from the matcher is the member_universe.id (as str). To int."""
-        if member_id is None:
+    def _reference_pk(idcol_id: str | None) -> int | None:
+        """The matcher's idcol_id is rilds_reference.idcol_id (as str). To int."""
+        if idcol_id is None:
             return None
         try:
-            return int(member_id)
+            return int(idcol_id)
         except (TypeError, ValueError):
             return None
 

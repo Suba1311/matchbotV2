@@ -45,8 +45,13 @@ class RunMetrics:
     finished_at: float | None = None
     status: RunStatus = RunStatus.SUCCESS
 
-    # Per-hop row counts.
+    # Per-hop row counts. rows_received is the total lines read from the
+    # source file (clean + rejected); rows_rejected is the parse-stage subset
+    # of those that had a field-count mismatch (kept verbatim in
+    # rilds_land_rejects) — distinct from rows_skipped, which is cleanse-stage
+    # skip_if_null drops (well-formed rows missing a required value).
     rows_received: int = 0
+    rows_rejected: int = 0
     rows_cleansed: int = 0
     rows_landed: int = 0
     rows_staged: int = 0
@@ -109,6 +114,7 @@ class RunMetrics:
             "duration_seconds": self.duration_seconds,
             "match_rate": self.match_rate,
             "rows_received": self.rows_received,
+            "rows_rejected": self.rows_rejected,
             "rows_cleansed": self.rows_cleansed,
             "rows_landed": self.rows_landed,
             "rows_staged": self.rows_staged,

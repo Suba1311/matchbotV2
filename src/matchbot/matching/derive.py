@@ -6,7 +6,7 @@ that here guarantees they never drift.
 
 Derived columns (mirror the agreed DDL):
     first_name_std, last_name_std        — uppercased, stripped, suffix-removed
-    first_name_metaphone, last_name_metaphone — primary metaphone code
+    first_name_metaphone1, last_name_metaphone1 — primary metaphone code
     last_name8                           — first 8 chars of last_name_std
     birth_year, birth_month, birth_day   — decomposed from birth_date
 
@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 DERIVED_COLUMNS: tuple[str, ...] = (
     "first_name_std",
     "last_name_std",
-    "first_name_metaphone",
-    "last_name_metaphone",
+    "first_name_metaphone1",
+    "last_name_metaphone1",
     "last_name8",
     "birth_year",
     "birth_month",
@@ -69,10 +69,10 @@ def add_derived_columns(df: pl.DataFrame, std_config: StandardizationConfig) -> 
     out = out.with_columns(
         pl.col("first_name_std")
         .map_elements(S.metaphone, return_dtype=pl.Utf8)
-        .alias("first_name_metaphone"),
+        .alias("first_name_metaphone1"),
         pl.col("last_name_std")
         .map_elements(S.metaphone, return_dtype=pl.Utf8)
-        .alias("last_name_metaphone"),
+        .alias("last_name_metaphone1"),
     )
 
     # last_name8 — first 8 chars of the standardized last name.
