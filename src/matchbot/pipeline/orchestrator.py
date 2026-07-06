@@ -25,7 +25,7 @@ from matchbot.matching.base import build_matchers
 from matchbot.pipeline.base import PipelineContext
 from matchbot.pipeline.canonical import CanonicalStage
 from matchbot.pipeline.cleanse import CleanseStage
-from matchbot.pipeline.match import MatchStage, resolve_matcher_chain
+from matchbot.pipeline.match import MatchStage, matched_on_attributes, resolve_matcher_chain
 from matchbot.pipeline.parse import ParseStage
 
 if TYPE_CHECKING:
@@ -204,6 +204,7 @@ class Orchestrator:
         else:
             chosen = list(g.matching.matchers)
         matchers = build_matchers(chosen, g.standardization)
+        metrics.matched_on = matched_on_attributes(chosen)
         members = self._repo.load_member_universe()
         index = blocking.index_members(members, keys)
 

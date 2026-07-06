@@ -94,7 +94,6 @@ def build_metadata(schema: str) -> MetaData:
         Column("rows_staged", Integer),
         Column("rows_matched", Integer),
         Column("rows_unmatched", Integer),
-        Column("rows_ambiguous", Integer),
         Column("rows_skipped", Integer),
         Column("stage_timings", JSON),
         Column("dq_metrics", JSON),

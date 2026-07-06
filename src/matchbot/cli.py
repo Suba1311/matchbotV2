@@ -77,7 +77,7 @@ def run(
         typer.echo(
             f"  {r.source_uri}: {m.rows_matched}/{m.rows_staged} matched "
             f"({m.match_rate:.1%}), {m.rows_unmatched} unmatched, "
-            f"{m.rows_ambiguous} ambiguous, {m.duration_seconds}s [{m.status.value}]"
+            f"{m.duration_seconds}s [{m.status.value}]"
         )
     if failures:
         raise typer.Exit(1)

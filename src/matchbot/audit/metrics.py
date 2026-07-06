@@ -52,13 +52,18 @@ class RunMetrics:
     rows_staged: int = 0
     rows_matched: int = 0
     rows_unmatched: int = 0
-    rows_ambiguous: int = 0
     rows_skipped: int = 0
 
     # Per-stage timings, and free-form DQ metrics keyed by rule name.
     stage_timings: list[StageTiming] = field(default_factory=list)
     dq_metrics: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+
+    # Human-readable attribute names the matcher chain actually compared
+    # (e.g. ["SASID"], or ["First Name", "Last Name", "Birth Date", "SSN"]).
+    # Set once by the orchestrator from the resolved matcher chain; purely
+    # informational — for notifications/reporting, not matching logic.
+    matched_on: list[str] = field(default_factory=list)
 
     @property
     def duration_seconds(self) -> float:
@@ -109,7 +114,6 @@ class RunMetrics:
             "rows_staged": self.rows_staged,
             "rows_matched": self.rows_matched,
             "rows_unmatched": self.rows_unmatched,
-            "rows_ambiguous": self.rows_ambiguous,
             "rows_skipped": self.rows_skipped,
             "stage_timings": [
                 {
