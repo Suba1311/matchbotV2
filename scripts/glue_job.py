@@ -204,8 +204,8 @@ def main() -> None:
             m = r.metrics
             print(
                 f"{r.source_uri}: {m.rows_matched}/{m.rows_staged} matched "
-                f"({m.match_rate:.1%}), {m.rows_unmatched} unmatched, "
-                f"{m.rows_ambiguous} ambiguous [{m.status.value}]"
+                f"({m.match_rate:.1%}), {m.rows_unmatched} unmatched "
+                f"[{m.status.value}]"
             )
         failures = sum(1 for r in results if r.metrics.status.value != "success")
         if failures:

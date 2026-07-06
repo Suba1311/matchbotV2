@@ -62,6 +62,45 @@ def resolve_matcher_chain(
     return resolved
 
 
+# Canonical attribute -> display name, for reporting (e.g. the email summary)
+# only — never used in matching logic itself. Falls back to a title-cased,
+# underscore-stripped version of the raw attribute for anything not listed
+# here, so a new canonical attribute doesn't require a code change to show up
+# reasonably in reports; add an entry here only to improve its display label.
+_ATTRIBUTE_DISPLAY_NAMES: dict[str, str] = {
+    "member_external_id": "SASID",
+    "first_name": "First Name",
+    "first_name_std": "First Name",
+    "middle_name": "Middle Name",
+    "last_name": "Last Name",
+    "last_name_std": "Last Name",
+    "birth_date": "Birth Date",
+    "ssn": "SSN",
+    "gender": "Gender",
+}
+
+
+def _display_name(attribute: str) -> str:
+    return _ATTRIBUTE_DISPLAY_NAMES.get(attribute, attribute.replace("_", " ").title())
+
+
+def matched_on_attributes(matcher_chain: list[MatcherSpec]) -> list[str]:
+    """Human-readable, deduplicated attribute names the chain compares on.
+
+    Deterministic matchers compare ``keys`` exactly; fuzzy matchers compare
+    each ``comparisons[].attribute`` by similarity. Order follows the chain's
+    declared order, first-seen; purely for reporting (e.g. the completion
+    email) — never consulted by matching logic itself.
+    """
+    seen: dict[str, None] = {}
+    for spec in matcher_chain:
+        for attr in spec.keys:
+            seen.setdefault(_display_name(attr), None)
+        for comparison in spec.comparisons:
+            seen.setdefault(_display_name(comparison.attribute), None)
+    return list(seen)
+
+
 class MatchStage:
     """Block, score, and route staged records to stage updates + target/error.
 
@@ -153,18 +192,18 @@ class MatchStage:
 
         # += not = : this runs once per batch, so the orchestrator's totals
         # must accumulate across calls rather than being overwritten each time.
-        batch_ambiguous = sum(1 for r in error_rows if r["decision"] == STATUS_LOW_CONFIDENCE)
-        batch_unmatched = len(error_rows) - batch_ambiguous
+        # AMBIGUOUS (low-confidence) records are still routed to the error
+        # table with their own decision/reason (see STATUS_LOW_CONFIDENCE
+        # below) — only the separate rows_ambiguous *count* was removed, so
+        # they're folded into rows_unmatched for reporting purposes.
         ctx.metrics.rows_matched += len(target_rows)
-        ctx.metrics.rows_ambiguous += batch_ambiguous
-        ctx.metrics.rows_unmatched += batch_unmatched
+        ctx.metrics.rows_unmatched += len(error_rows)
 
         log.info(
             "match.batch_done",
             staged=len(records),
             matched=len(target_rows),
-            unmatched=batch_unmatched,
-            ambiguous=batch_ambiguous,
+            unmatched=len(error_rows),
             candidates_indexed=len(members),
         )
 

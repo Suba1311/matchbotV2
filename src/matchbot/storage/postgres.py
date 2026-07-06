@@ -128,7 +128,6 @@ class PostgresRepository(Repository):
                     rows_staged=m["rows_staged"],
                     rows_matched=m["rows_matched"],
                     rows_unmatched=m["rows_unmatched"],
-                    rows_ambiguous=m["rows_ambiguous"],
                     rows_skipped=m["rows_skipped"],
                     stage_timings=m["stage_timings"],
                     dq_metrics=m["dq_metrics"],
