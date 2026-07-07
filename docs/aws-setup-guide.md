@@ -1,428 +1,451 @@
-# MatchBot — AWS Glue and ECS Setup Guide
+# MatchBot — AWS Production Setup Guide
 
-This is a step-by-step console guide for setting up and running MatchBot on
-both AWS Glue and AWS ECS Fargate, including the automated S3-upload triggers
-and the issues encountered (and fixed) while standing this up. For an
-explanation of *why* the code is structured the way it is, see
-[glue-implementation.md](glue-implementation.md) and
-[ecs-implementation.md](ecs-implementation.md).
+This document describes how to deploy and operate MatchBot on AWS. MatchBot
+can run on either **AWS Glue** or **AWS ECS Fargate** — both execute the same
+pipeline code against the same database schema, so they are interchangeable
+compute options rather than two separate systems. This guide covers both.
+
+**Contents**
+1. [Architecture overview](#1-architecture-overview)
+2. [Prerequisites](#2-prerequisites)
+3. [Database setup (RDS)](#3-database-setup-rds)
+4. [AWS Glue setup](#4-aws-glue-setup)
+5. [AWS ECS Fargate setup](#5-aws-ecs-fargate-setup)
+6. [Automated triggering on file upload](#6-automated-triggering-on-file-upload)
+7. [Other AWS services used](#7-other-aws-services-used)
+8. [Matching logic](#8-matching-logic)
+9. [Cost estimation](#9-cost-estimation)
+10. [Operational notes](#10-operational-notes)
 
 ---
 
-## Part 1 — Shared prerequisites
+## 1. Architecture overview
 
-Both platforms need the same underlying pieces:
+```
+S3 (file uploaded to data/input/<provider>/)
+        │
+        ▼
+  EventBridge rule (Object Created)
+        │
+        ▼
+  Trigger Lambda (per compute platform)
+        │
+        ├──────────────────────────────┬──────────────────────────────┐
+        ▼                              ▼                              
+   AWS Glue job                   ECS Fargate task                    
+   (fetches code + config          (code + config baked
+    from S3 at runtime)             into the container image)         
+        │                              │
+        └──────────────┬───────────────┘
+                        ▼
+                  RDS (PostgreSQL)
+        rilds_stage · rilds_matched · rilds_error
+        rilds_land_rejects · rilds_audit · rilds_reference
+        <provider>_land
+                        │
+                        ▼
+              SES (run-summary email)
+```
 
-- An S3 bucket (`rilds` in this setup) holding provider input files, config,
-  and (for Glue) the packaged wheel
-- An RDS Postgres instance with the MatchBot schema initialized
-  (`matchbot init-db`)
-- Network connectivity from the compute (Glue job / ECS task) to RDS
+Both platforms:
+- Read one provider file per run
+- Parse → cleanse/standardize → map to canonical schema → match against
+  `rilds_reference` → write results
+- Write to the same RDS schema
+- Emit the same run-summary notification
 
-### 1.1 Build the deployable Python package (wheel)
+Choosing between them is an infrastructure decision (see [Section 9](#9-cost-estimation)), not a functional one.
 
-Both the Glue path and the initial ECS approach rely on a built wheel at some
-point. On your local machine, in the project directory:
+---
+
+## 2. Prerequisites
+
+Before starting either platform's setup:
+
+- An S3 bucket for input files (and, for Glue, packaged code) — referred to
+  as `rilds` throughout this guide
+- An RDS PostgreSQL instance, reachable from the compute you intend to use
+- A VPC with subnets that both RDS and the compute (Glue/ECS) can use
+- (Optional) A verified SES sender identity, if email run-summaries are
+  wanted
+
+### Build the deployable package
+
+MatchBot ships as a Python wheel. Build it from the project root:
 
 ```bash
 uv build --wheel
 ```
 
-This produces `dist/matchbot-0.1.0-py3-none-any.whl`. **Rebuild this any time
-`src/matchbot/` changes** — an existing `.whl` file is not automatically
-regenerated; forgetting this step was the cause of several "fix didn't work"
-incidents during setup (see Part 4).
-
-Verify the fix you expect is actually in the built wheel before uploading:
-```bash
-unzip -p dist/matchbot-0.1.0-py3-none-any.whl matchbot/pipeline/orchestrator.py | grep -A5 "some_expected_string"
-```
-
-### 1.2 Initialize the RDS schema — without ECS or Glue
-
-`matchbot init-db` creates the schema and tables idempotently (safe to
-re-run). This is a one-time (or rarely-repeated) setup step and does not need
-a full ECS task or Glue job launch — run it directly against RDS instead.
-
-**Option A — from your local machine (simplest):**
-
-```bash
-# In matchbotV2/, with .env pointing at the real RDS instance:
-#   DATABASE_URL=postgresql://<user>:<pass>@<rds-endpoint>:5432/<dbname>
-#   DB_SCHEMA=<your schema>
-uv run matchbot init-db
-```
-
-This only works if your machine can reach RDS on port 5432 — same
-requirement as connecting via DBeaver or `psql`. If RDS sits in a private VPC
-subnet with no public access, your local machine can't reach it unless
-you're on a VPN or bastion host with routing into that VPC.
-
-**Option B — AWS CloudShell (browser-based, no local network path needed):**
-
-Useful when RDS has no public access and your local machine can't reach it,
-but CloudShell can (note: CloudShell isn't automatically inside your VPC
-either — this only helps if CloudShell's network path to RDS is actually
-open, e.g. RDS allows the CloudShell environment's egress, or CloudShell is
-configured with a VPC environment).
-
-1. Open **CloudShell** from the AWS Console top navigation bar
-2. Upload the project (zip it locally, upload via CloudShell's **Actions →
-   Upload file**, then `unzip`) — same process used earlier for building the
-   ECS image in CloudShell
-3. Install `uv` and Python 3.11+ in CloudShell if not already present:
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
-4. From the project directory:
-   ```bash
-   uv sync
-   uv run matchbot init-db
-   ```
-
-Both options call the exact same idempotent schema builder the ECS image and
-Glue job use internally — there's no drift risk from doing this outside
-those platforms.
+This produces `dist/matchbot-0.1.0-py3-none-any.whl`. Rebuild this whenever
+the application code changes — Glue installs this wheel at runtime, and ECS
+images are built from the same source tree.
 
 ---
 
-## Part 2 — AWS Glue setup
+## 3. Database setup (RDS)
 
-### 2.1 Upload artifacts to S3
+### 3.1 Instance configuration
 
-**S3 console → rilds bucket:**
-1. Create/open `glue/wheels/` → Upload → `dist/matchbot-0.1.0-py3-none-any.whl`
-2. Create/open `glue/scripts/` → Upload → `scripts/glue_job.py`
-3. Create/open `glue/config/` → Upload the entire local `config/` directory,
-   preserving structure (`global.yaml` + `providers/*.yaml`)
+- Engine: PostgreSQL 14+
+- Place RDS in a private subnet; only the security groups used by Glue and
+  ECS (Sections 4 and 5) should have inbound access on port 5432
+- Note the instance endpoint, database name, and credentials — these form
+  the `DATABASE_URL` used by every job: `postgresql://<user>:<pass>@<endpoint>:5432/<dbname>`
+- `DB_SCHEMA` selects the PostgreSQL schema MatchBot uses. No schema name is
+  hardcoded anywhere in the application, so multiple environments (e.g.
+  dev/stage/prod) can share one RDS instance under different schemas.
 
-   **Caution:** if you create folders manually in the S3 console before
-   uploading, S3 sometimes creates zero-byte "folder placeholder" objects
-   (keys ending in `/`). The code handles this correctly (skips them during
-   config sync), but it's cleaner to drag-and-drop a whole local folder
-   instead of pre-creating empty folders.
+### 3.2 Initial schema creation
 
-### 2.2 Create an IAM role for Glue
+Run once per environment/schema:
 
-**IAM console → Roles → Create role:**
-- Trusted entity: AWS service → Glue
-- Attach: `AWSGlueServiceRole` (managed policy)
-- Add an inline policy granting `s3:GetObject` / `s3:ListBucket` on your
-  bucket, and `s3:PutObject` if the job writes anything back to S3
-- Name it e.g. `matchbot-glue-role`
+```bash
+uv run matchbot init-db
+```
 
-### 2.3 Create a security group for Glue's VPC connection
+This is idempotent — safe to re-run, and safe to leave as an automatic step
+at the start of every pipeline run (which is how the Glue job and ECS task
+are configured). It creates all pipeline-owned tables and indexes if they do
+not already exist, and does nothing if they do.
 
-Glue jobs that connect to RDS need a VPC-attached connection, which requires
-a dedicated security group with a specific self-referencing rule.
+If the machine running this command cannot reach RDS directly (e.g. private
+subnet, no VPN), run it instead from **AWS CloudShell** or any host with
+network access into the VPC.
 
-**EC2 console → Security Groups → Create security group:**
-1. Name: `matchbot-glue-sg`
-2. VPC: same VPC as your RDS instance
-3. Leave inbound rules **empty** for now — create the group first
-4. Create the security group
+### 3.3 Tables
 
-Then, **immediately after creation**, edit it to add the required
-self-reference rule:
-1. Open `matchbot-glue-sg` → Inbound rules → Edit inbound rules
-2. Add rule: Type = All traffic, Source = Custom → search for and select
-   `matchbot-glue-sg` itself (only selectable now that the group exists)
-3. Save
+Created automatically by `init-db` / `init_schema()`:
 
-> **Why this rule is required:** AWS Glue provisions elastic network
-> interfaces (ENIs) for Spark driver/executor communication. Glue requires at
-> least one attached security group to allow all-traffic ingress from itself,
-> or job startup fails immediately with:
-> `InvalidInputException: At least one security group must open all ingress ports.`
-> This is unrelated to RDS access — it's purely for Glue's internal
-> node-to-node communication.
+| Table | Purpose |
+|---|---|
+| `rilds_audit` | One row per pipeline run — status, row counts at each stage, timings, match rate, DQ metrics. |
+| `<provider>_land` | Per-provider immutable raw archive of every source file, one table per provider, created on first run. |
+| `rilds_land_rejects` | Source rows that failed structural parsing (e.g. field-count mismatch), retained verbatim for review. |
+| `rilds_stage` | Canonical working table: incoming rows mapped to standard attributes plus derived blocking columns, updated in place with match results. |
+| `rilds_matched` | One row per successful match — which reference record it matched, the score, and which rule produced it. |
+| `rilds_error` | One row per unmatched or ambiguous record, with a reason, for manual review. |
+| `member_universe` | Legacy reference table, retained for compatibility. Not used by the active matching path. |
 
-### 2.4 Allow Glue to reach RDS
+**Not created or managed by the pipeline:**
 
-**EC2 console → Security Groups → (your RDS instance's security group):**
-1. Inbound rules → Edit inbound rules → Add rule
-2. Type: PostgreSQL (port 5432), Source: Custom → `matchbot-glue-sg`
-3. Save
+| Table | Purpose |
+|---|---|
+| `rilds_reference` | The authoritative matching universe — a person/identifier/address reference table populated from an external source system. The pipeline will create this table if it does not exist (so `init-db` never fails on a fresh account), but it never writes to it and never truncates or reseeds it. Loading and refreshing this table's data is a separate, deliberate operational process outside the pipeline's normal run cycle. |
 
-### 2.5 Create a Glue connection
+---
 
-**AWS Glue console → Data connections → Create connection:**
+## 4. AWS Glue setup
+
+### 4.1 Upload artifacts to S3
+
+Under the project's S3 bucket:
+
+1. `glue/wheels/` — upload `dist/matchbot-0.1.0-py3-none-any.whl`
+2. `glue/scripts/` — upload `scripts/glue_job.py` (used only as the initial
+   source when the job is first created — see Section 10.1)
+3. `glue/config/` — upload the entire `config/` directory, preserving its
+   structure (`global.yaml` plus everything under `providers/`)
+
+### 4.2 IAM role for Glue
+
+Create a role with:
+- Trusted entity: AWS Glue
+- Managed policy: `AWSGlueServiceRole`
+- Inline policy: `s3:GetObject` / `s3:ListBucket` on the project bucket
+- If using SES notifications: `ses:SendEmail`, `ses:SendRawEmail`
+
+### 4.3 Security group for Glue's VPC connection
+
+Glue jobs that connect to RDS require a VPC-attached connection, which in
+turn requires a security group with a self-referencing all-traffic rule
+(this is a Glue platform requirement for internal Spark node communication,
+unrelated to RDS access):
+
+1. Create a security group in the same VPC as RDS (e.g. `matchbot-glue-sg`)
+2. Edit its inbound rules: add a rule allowing all traffic with itself as
+   the source
+
+### 4.4 Allow Glue to reach RDS
+
+On the RDS instance's security group, add an inbound rule: PostgreSQL
+(5432), source = the Glue security group created above.
+
+### 4.5 Create a Glue JDBC connection
+
 - Type: JDBC
 - JDBC URL: `jdbc:postgresql://<rds-endpoint>:5432/<dbname>`
-- VPC / Subnet: same as RDS
-- Security group: `matchbot-glue-sg`
-- Name: `matchbot-rds-connection`
+- VPC / subnet: same as RDS
+- Security group: the one created in 4.3
 
-### 2.6 Create the Glue job
+### 4.6 Create the Glue job
 
-**AWS Glue console → ETL jobs → Create job:**
+Using the Script Editor (not the Visual ETL canvas):
 
-You'll see three cards: **Visual ETL**, **Notebook**, **Script editor** —
-choose **Script editor** (Visual ETL only produces Spark jobs and hides the
-Python Shell option; if you want Python Shell specifically, it's only
-reachable from Script editor's Engine dropdown, and even then may not be
-available — see the compatibility note in section 2.6.1).
-
-1. Choose **Upload an existing script** → select `scripts/glue_job.py` (or
-   paste its content in afterward)
-2. **Job details** tab:
+1. Upload `scripts/glue_job.py` as the initial script
+2. **Job details:**
    - Name: `matchbot-run`
-   - IAM Role: `matchbot-glue-role`
-   - Type/Engine: **Spark** (see 2.6.1 for why Python Shell isn't used here)
-   - Glue version: latest (5.x) — Python 3.11 under the hood
-   - Worker type: G.1X, Number of workers: 2 (practical minimum for Spark)
-3. **Advanced properties → Connections**: attach `matchbot-rds-connection`
-4. **Advanced properties → Job parameters**, add:
+   - IAM role: the role created in 4.2
+   - Type: Spark
+   - Glue version: latest 5.x (Python 3.11 runtime)
+   - Worker type: G.1X, 2 workers
+3. **Connections:** attach the JDBC connection from 4.5
+4. **Job parameters:**
 
    | Key | Value |
    |---|---|
    | `--wheel_s3_uri` | `s3://rilds/glue/wheels/matchbot-0.1.0-py3-none-any.whl` |
    | `--config_s3_uri` | `s3://rilds/glue/config/` |
    | `--database_url` | `postgresql://<user>:<pass>@<rds-endpoint>:5432/<dbname>` |
-   | `--db_schema` | your schema name |
+   | `--db_schema` | target schema name |
    | `--command` | `run` |
+   | `--notifier` | `ses` (omit, or set `log`, to disable email) |
+   | `--ses_sender` | verified SES sender address |
+   | `--ses_recipients` | comma-separated recipient list |
 
-5. Save
+5. Save the job
 
-#### 2.6.1 Why Spark, not Python Shell
+### 4.7 Running the job
 
-AWS Glue's Python Shell job type runs a fixed Python 3.9 runtime, and does
-**not** appear as an option in the newer Glue Studio "Create job" visual
-flow at all — only in Script editor's Engine dropdown, and even there it may
-only show Spark/Spark Streaming depending on your console version.
+Run with parameters:
+- `--provider` = the provider id (e.g. `ride_enrollment`)
+- `--input_uri` = the S3 URI of the file to process
 
-Separately, even if Python Shell is available, MatchBot's dependency
-`duckdb>=1.5.4` publishes no `cp39` (Python 3.9) wheel on PyPI — only
-`cp310` and up — so `pip install` fails under Python Shell's fixed runtime
-regardless. (This was resolved by removing the unused `duckdb` dependency
-from `pyproject.toml`, but Spark remains the simpler, already-working choice
-given the console limitation.)
-
-Cost implication: Spark jobs have a 2 DPU minimum (~$0.44/DPU-hour), so even
-a fast job costs roughly $0.02–0.03 per run regardless of actual duration —
-this is a fixed floor, not something reduced by making the job faster.
-
-### 2.7 Run and verify
-
-**Glue console → ETL jobs → matchbot-run → Run with parameters:**
-- `--provider` = `ride_enrollment`
-- `--input_uri` = `s3://rilds/data/input/ride_enrollment/ride_enrollment_1k.csv`
-
-Check **Runs tab → (this run) → Output logs** for the match summary line;
-**Error logs** for tracebacks if it fails.
+Job output and errors are available under the job's **Runs** tab.
 
 ---
 
-## Part 3 — ECS Fargate setup
+## 5. AWS ECS Fargate setup
 
-### 3.1 Build and push the container image
-
-The Dockerfile bakes the code and config into the image at build time
-(unlike Glue, which fetches fresh from S3 every run). Build via CodeBuild (if
-connected to your GitHub repo) or locally:
+### 5.1 Build and push the container image
 
 ```bash
 docker build -t matchbot:latest .
-aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-2.amazonaws.com
-docker tag matchbot:latest <account-id>.dkr.ecr.us-east-2.amazonaws.com/matchbot:latest
-docker push <account-id>.dkr.ecr.us-east-2.amazonaws.com/matchbot:latest
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account-id>.dkr.ecr.<region>.amazonaws.com
+docker tag matchbot:latest <account-id>.dkr.ecr.<region>.amazonaws.com/matchbot:latest
+docker push <account-id>.dkr.ecr.<region>.amazonaws.com/matchbot:latest
 ```
 
-### 3.2 Create an IAM role for the ECS task
+### 5.2 IAM role for the ECS task
 
-**IAM console → Roles → Create role:**
-- Trusted entity: Elastic Container Service → Task
-- Needs S3 read access (input files, if reading directly) and RDS
-  connectivity (network-level, not IAM)
-- Name it e.g. `matchbot-ecs-task-role`
+Create a task role with:
+- S3 read access, if the task reads input files directly
+- If using SES notifications: `ses:SendEmail`, `ses:SendRawEmail`
 
-### 3.3 Create the ECS task definition
+### 5.3 Create the ECS cluster
 
-**ECS console → Task Definitions → Create new task definition:**
-- Name: `matchbot-task`
+- Infrastructure: AWS Fargate
+- Name: e.g. `matchbot-cluster`
+
+### 5.4 Create the ECS task definition
+
 - Launch type: Fargate
-- Task CPU: 1 vCPU (1024)
-- Task memory: start at **2 GB**, but see Part 4 for known issues at scale —
-  8 GB was still insufficient for a 1M-row file before the batching fix
-  (Part 4.3) was applied; re-test memory sizing after that fix
+- Task CPU: 1 vCPU
+- Task memory: 2–4 GB is sufficient at current data volumes (the pipeline
+  processes files in bounded batches, so memory use does not scale with file
+  size)
 - Container:
-  - Name: `matchbot` (must match `ECS_CONTAINER_NAME` used by the trigger
-    Lambda, below)
-  - Image: `<account-id>.dkr.ecr.us-east-2.amazonaws.com/matchbot:latest`
-  - Log configuration: `awslogs` driver, a CloudWatch log group of your choice
+  - Name: `matchbot`
+  - Image: the ECR image pushed in 5.1
+  - Environment variables: `DATABASE_URL`, `DB_SCHEMA`, and (optionally)
+    `MATCHBOT_NOTIFIER=ses`, `MATCHBOT_SES_SENDER`, `MATCHBOT_SES_RECIPIENTS`,
+    `AWS_REGION`
+  - Logging: `awslogs` driver, to a CloudWatch log group
 
-**Important:** every time you push a new image (same tag), you must
-**Create new revision** on this task definition — ECS does not automatically
-pick up a new image under an existing revision. This was the root cause of
-several "the fix didn't work" false alarms during troubleshooting.
+Each time a new image is pushed under the same tag, create a **new task
+definition revision** — ECS does not pick up a new image under an existing
+revision automatically.
 
-### 3.4 Security groups for ECS → RDS
+### 5.5 Security groups for ECS → RDS
 
-**EC2 console → Security Groups:**
-1. Create (or reuse) a security group for the ECS task, e.g. `matchbot-ecs-sg`
-2. On the **RDS security group**: add inbound rule, Type = PostgreSQL (5432),
-   Source = `matchbot-ecs-sg`
+1. Create (or reuse) a security group for the ECS task (e.g.
+   `matchbot-ecs-sg`)
+2. On the RDS security group, add an inbound rule: PostgreSQL (5432),
+   source = `matchbot-ecs-sg`
 
-(ECS does **not** need the Glue-specific self-referencing all-traffic rule —
-that requirement is specific to Glue's Spark driver/executor ENI
-communication, which a single-container Fargate task doesn't have.)
+### 5.6 Running a task manually
 
-### 3.5 Run and verify manually (before automating)
-
-Use **ECS console → Clusters → (your cluster) → Run new task**, or test via
-the trigger Lambda directly, specifying:
-- Task definition: `matchbot-task`
-- Container override command: `["run", "--provider", "ride_enrollment", "--input", "s3://rilds/data/input/ride_enrollment/ride_enrollment_1k.csv"]`
-
-Check the task's CloudWatch logs for the match summary line.
+From the ECS console, run a new task with a container command override:
+```
+["run", "--provider", "<provider_id>", "--input", "<s3-uri-of-file>"]
+```
 
 ---
 
-## Part 4 — Automated S3-upload triggers (both platforms)
+## 6. Automated triggering on file upload
 
-Both platforms use the same pattern: **S3 upload → EventBridge → Lambda →
-launch compute**. Each platform has its own dedicated Lambda so they can run
-independently (e.g. side-by-side during a migration/comparison period).
+Both platforms are triggered the same way: an S3 upload fires an
+EventBridge rule, which invokes a Lambda function that launches the
+appropriate compute.
 
-### 4.1 Enable EventBridge notifications on the bucket
+### 6.1 Enable EventBridge notifications on the bucket
 
-**S3 console → rilds → Properties tab → Amazon EventBridge:**
-- Must show **"On"** — this is off by default and is the most commonly
-  missed step. If off: Edit → Enable → Save.
+S3 console → bucket → Properties → Amazon EventBridge → **On**.
 
-### 4.2 Create the EventBridge rule
+### 6.2 Create the EventBridge rule
 
-**EventBridge console → Rules → Create rule:**
-- Event source: AWS services → S3
-- Event pattern (adjust bucket name/prefix as needed):
-  ```json
-  {
-    "source": ["aws.s3"],
-    "detail-type": ["Object Created"],
-    "detail": {
-      "bucket": { "name": ["rilds"] },
-      "object": { "key": [{ "prefix": "data/input/" }] }
-    }
+Event pattern:
+```json
+{
+  "source": ["aws.s3"],
+  "detail-type": ["Object Created"],
+  "detail": {
+    "bucket": { "name": ["rilds"] },
+    "object": { "key": [{ "prefix": "data/input/" }] }
   }
-  ```
-- Targets: add **both** Lambda functions below (or one, if only automating
-  one platform)
+}
+```
 
-### 4.3 ECS trigger Lambda
+Add each trigger Lambda (Section 6.3, 6.4) as a target.
 
-**Lambda console → Create function** → `matchbot-s3-trigger`
+### 6.3 ECS trigger Lambda
 
-Deploy the code from `scripts/lambda_function.py`. It:
-1. Parses the S3 key (`data/input/<provider_folder>/<filename>`)
-2. Maps the folder name to a `provider_id` (edit `FOLDER_TO_PROVIDER` in the
-   script to onboard new providers)
-3. Validates the filename against the provider's expected glob
-4. Calls `ecs.run_task(...)` with the provider and S3 URI as container
-   command overrides
+Deploy `scripts/lambda_function.py`. It maps the uploaded file's S3 prefix
+to a provider id and calls `ecs.run_task(...)`.
 
-**Environment variables:**
+Environment variables:
 
 | Key | Example |
 |---|---|
 | `ECS_CLUSTER` | `matchbot-cluster` |
-| `ECS_TASK_DEFINITION` | `matchbot-task` (no `:N` suffix → always uses latest revision) |
+| `ECS_TASK_DEFINITION` | `matchbot-task` |
 | `ECS_CONTAINER_NAME` | `matchbot` |
-| `ECS_SUBNET_ID` | your subnet ID |
+| `ECS_SUBNET_ID` | target subnet id |
 | `ECS_SECURITY_GROUP` | `matchbot-ecs-sg` |
 | `S3_BUCKET` | `rilds` |
 
-**IAM permissions needed on this Lambda's execution role:**
-- `ecs:RunTask` scoped to the task definition ARN
-- `iam:PassRole` (condition: `iam:PassedToService = ecs-tasks.amazonaws.com`)
-  — required because `run_task` must pass the task's execution/task role to
-  ECS
+Execution role requires `ecs:RunTask` (scoped to the task definition) and
+`iam:PassRole` (condition: `iam:PassedToService = ecs-tasks.amazonaws.com`).
 
-### 4.4 Glue trigger Lambda
+### 6.4 Glue trigger Lambda
 
-**Lambda console → Create function** → `matchbot-glue-trigger`
+Deploy `scripts/lambda_function_glue.py`. Same provider-mapping logic, calls
+`glue.start_job_run(...)`.
 
-Deploy the code from `scripts/lambda_function_glue.py`. Same S3-key parsing
-and provider-mapping logic as the ECS Lambda, but calls
-`glue.start_job_run(...)` instead.
-
-**Environment variables:**
+Environment variables:
 
 | Key | Example |
 |---|---|
 | `GLUE_JOB_NAME` | `matchbot-run` |
-| `DATABASE_URL` | `postgresql://user:pass@host:5432/matchbot` |
-| `DB_SCHEMA` | your schema |
+| `DATABASE_URL` | connection string |
+| `DB_SCHEMA` | target schema |
 | `CONFIG_S3_URI` | `s3://rilds/glue/config/` |
 | `WHEEL_S3_URI` | `s3://rilds/glue/wheels/matchbot-0.1.0-py3-none-any.whl` |
 
-**IAM permission needed:** `glue:StartJobRun` scoped to the job's ARN.
+Execution role requires `glue:StartJobRun` scoped to the job's ARN.
 
-### 4.5 Grant EventBridge permission to invoke each Lambda
+### 6.5 Grant EventBridge permission to invoke each Lambda
 
-This step is easy to miss and produces a *silent* failure: EventBridge
-reports a `FailedInvocation` in its own CloudWatch metrics, but **nothing
-appears in the Lambda's own logs** (the log group won't even exist yet,
-since Lambda only creates it on first successful invocation).
-
-**Lambda console → (each function) → Configuration → Permissions →
-Resource-based policy statements → Add permissions:**
-- Service: EventBridge (`events.amazonaws.com`)
-- Action: `lambda:InvokeFunction`
-- Source ARN: the specific EventBridge rule's ARN (scopes the grant to just
-  that rule)
-
-**How to verify this is the problem, if a trigger silently doesn't fire:**
-1. CloudWatch console → Metrics → All metrics → Events (EventBridge
-   namespace) → By Rule Name → check `Invocations` and `FailedInvocations`
-   for your rule
-2. If both show activity (e.g. 1 invocation, 1 failure) but the Lambda's own
-   log group doesn't exist, this permission is the cause
-3. Verify directly: `aws lambda get-policy --function-name <name>` — check
-   the `Principal` is `events.amazonaws.com` and the `Condition.ArnLike`
-   matches your actual rule's ARN exactly (get the real ARN via
-   `aws events list-rules`)
-4. **Also check the rule's target itself** — `aws events list-targets-by-rule
-   --rule <rule-name>` shows the exact IAM `RoleArn` EventBridge uses to
-   invoke the target. If a `RoleArn` is present, EventBridge assumes *that*
-   role to call the Lambda (a completely separate permission path from the
-   Lambda's own resource-based policy) — the role must have
-   `lambda:InvokeFunction` on the correct function ARN. A role scoped to only
-   one of your two Lambdas will silently fail to invoke the other.
+On each Lambda's resource-based policy, add a statement allowing
+`events.amazonaws.com` to call `lambda:InvokeFunction`, scoped to the
+EventBridge rule's ARN.
 
 ---
 
-## Part 5 — Known issues encountered and fixed
+## 7. Other AWS services used
 
-This section documents real failures hit while standing this up, in case
-they recur (e.g. after a dependency upgrade or a new provider onboarding).
+| Service | Role |
+|---|---|
+| **S3** | Stores input files, and (Glue only) the packaged wheel and config. Source of the upload events that drive automated runs. |
+| **EventBridge** | Detects file uploads and routes them to the trigger Lambdas. |
+| **Lambda** | Two small functions that translate an S3 upload into a Glue job run or an ECS task run. |
+| **AWS Glue** | Spark-based compute option; installs the application at runtime from S3. |
+| **ECS Fargate** | Container-based compute option; runs a prebuilt image. |
+| **ECR** | Hosts the Docker image used by ECS. |
+| **CodeBuild** | Optional — builds and pushes the Docker image from source. |
+| **RDS (PostgreSQL)** | System of record for all pipeline tables. |
+| **IAM** | Roles for Glue, the ECS task, and each Lambda; resource-based Lambda policy for EventBridge invocation. |
+| **CloudWatch** | Logs for Glue runs, ECS tasks, and Lambda invocations. |
+| **SES** | Optional — sends the run-summary email at the end of each pipeline run. |
+| **VPC / Security groups** | Network boundary between compute and RDS. |
 
-| Symptom | Root cause | Fix |
+---
+
+## 8. Matching logic
+
+Matching is fully configuration-driven (`config/global.yaml`,
+`matching.matchers`) and applies identically to every provider — there is no
+per-provider matching code. All rules currently configured are **exact-match
+only** (no fuzzy matching, no confidence scoring):
+
+| Order | Rule | Attributes compared |
 |---|---|---|
-| `InvalidInputException: At least one security group must open all ingress ports` | Glue connection's security group has no self-referencing all-traffic rule | Add inbound rule: all traffic, source = the security group itself (section 2.3) |
-| `pip install failed: ... is not a valid wheel filename` | Wheel downloaded to a renamed local path (e.g. `matchbot-latest.whl`) — pip validates filenames per PEP 427 | Keep the original filename from the S3 key when downloading (already fixed in `scripts/glue_job.py`) |
-| `ModuleNotFoundError: No module named 'yaml'` | Wheel installed with `pip install --no-deps`, so dependencies never landed | Install with `pip install <wheel>[aws]` (no `--no-deps`); already fixed |
-| `Providers directory not found` | `config/providers/` never uploaded to S3, or upload incomplete | Verify `s3://.../config/` mirrors the local `config/` tree exactly |
-| `FileExistsError: ... 'providers'` | An S3 "folder placeholder" object (zero-byte key ending in `/`) collided with the real directory during config sync | Fixed in `scripts/glue_job.py` — skips any S3 key ending in `/` |
-| `OperationalError: failed to resolve host ...` | Typo/duplication in the `--database_url` parameter's hostname | Copy the exact endpoint from RDS console → Connectivity & security |
-| `ecs:RunTask ... not authorized` | Lambda's execution role missing `ecs:RunTask` / `iam:PassRole` | Add both permissions to the Lambda's role (section 4.3) |
-| Lambda never invoked; no log group; EventBridge shows 1 Invocation + 1 FailedInvocation | Lambda's resource-based policy missing the `events.amazonaws.com` invoke grant, **or** the rule's target uses an IAM `RoleArn` scoped to a different Lambda | Add the resource-based policy statement (section 4.5); check `list-targets-by-rule` for a `RoleArn` and verify its policy covers the right function ARN |
-| `ComputeError: could not append value: N of type: i64 to the builder` | `pl.DataFrame(rows)` on a large row list defaults to sampling only the first 100 rows for type inference; a column that's `None` in all sampled rows gets the wrong dtype and fails once a real value appears later | Fixed: pass `infer_schema_length=None` wherever building a `pl.DataFrame` from row dicts |
-| ECS task exits with code 137, reason `OutOfMemoryError: container killed due to memory usage`, even at 8 GB | The pipeline materialized an entire multi-hundred-thousand-to-million-row file as Python dicts (in LAND write, STAGE write, and MATCH) all at once, several times over, before writing anything to the database | Fixed: LAND, STAGE, and MATCH now process in fixed-size batches (50,000 rows), writing each batch to the database immediately before processing the next |
-| A code/config fix appears not to work after redeploying | Stale artifact — either the wheel in S3 was rebuilt from stale local files (check `dist/*.whl` timestamp against when the fix was actually made), or a new image was pushed to ECR without creating a new ECS task definition revision | Always verify: `unzip -p dist/*.whl <path/to/file.py> \| grep <expected fix>` before uploading; always click **Create new revision** on the ECS task definition after every image push |
+| 1 | External id | The provider's own identifier (e.g. RIDE's SASID), mapped via that provider's configuration |
+| 2 | SSN | Social Security Number |
+| 3 | Name + date of birth | Standardized first name, last name, and birth date |
+| 4 | Name + address | Standardized first name, last name, and address line 1 |
+
+**Evaluation order, per record:** rules are tried in the order above, for
+each incoming record individually. If a rule finds no match, the next rule
+is tried for that same record. A record is only evaluated against a rule if
+it has values for every attribute that rule requires; a provider whose file
+never supplies a given attribute (for example, no date-of-birth column) has
+that rule skipped for its entire file, not just individual records.
+
+**Match outcome:** the first rule to find a match wins (score is always
+`1.0`, since all rules are exact-equality). The result records which
+attributes were compared and which rule produced the match. Records that
+exhaust all applicable rules without a match are written to `rilds_error`
+for review.
+
+**Blocking:** before scoring, candidate reference records are narrowed using
+configured blocking keys (external id, SSN, last name + DOB, first + last +
+DOB, first + last name, or last name with phonetic matching). This is a
+performance optimization only — it does not affect which matches are
+accepted.
 
 ---
 
-## Part 6 — Cost notes
+## 9. Cost estimation
 
-Rough Fargate (us-east-2) pricing used for comparison during setup:
-- vCPU: $0.04048/vCPU-hour
-- Memory: $0.004445/GB-hour
+Approximate figures for comparing the two compute options; confirm current
+rates for your region before budgeting.
 
-Rough Glue Spark pricing: $0.44/DPU-hour, 2 DPU minimum, billed per second
-(1-minute minimum).
+| Resource | Rate |
+|---|---|
+| Fargate vCPU | ~$0.04048 / vCPU-hour |
+| Fargate memory | ~$0.004445 / GB-hour |
+| Glue Spark | ~$0.44 / DPU-hour, 2 DPU minimum, billed per second with a 1-minute minimum |
+| SES | $0.10 per 1,000 emails |
 
-**Practical takeaway:** ECS cost scales with actual run duration (cheap for
-short runs, but a very long-running task can eventually cost more than
-Glue's fixed floor). Glue's cost is dominated by the 2 DPU Spark minimum
-regardless of how fast the job actually completes — making a Glue job faster
-does not meaningfully reduce its cost, but making an ECS task faster does.
+**Per-run cost (illustrative):**
+
+| Run duration | ECS (1 vCPU / 2 GB) | Glue (2 DPU) |
+|---|---|---|
+| 1 minute | ~$0.001 | ~$0.015 (1-minute minimum) |
+| 5 minutes | ~$0.004 | ~$0.073 |
+| 30 minutes | ~$0.025 | ~$0.44 |
+
+ECS cost scales directly with run duration and has no fixed floor. Glue
+carries a fixed 2 DPU / 1-minute cost floor regardless of job size, which
+dominates cost at typical run durations. Both are inexpensive at current
+data volumes (up to roughly 1M rows per file); the choice between platforms
+should generally be based on operational fit rather than cost.
+
+---
+
+## 10. Operational notes
+
+### 10.1 Updating the Glue job's script after creation
+
+Once a Glue job has been created and run at least once, AWS Glue maintains
+its own managed copy of the script separate from the S3 location it was
+originally uploaded from. To change the script after initial setup, edit it
+directly via the job's **Script** tab in the console (or update it via the
+Glue API), not by re-uploading to the original S3 location.
+
+### 10.2 Redeploying after a code change
+
+1. Rebuild the wheel (`uv build --wheel`)
+2. **Glue:** upload the new wheel to the S3 location referenced by
+   `--wheel_s3_uri`; update the script via the Script tab if it changed
+3. **ECS:** rebuild and push the Docker image, then create a new task
+   definition revision — pushing a new image alone does not update a
+   running or future task under the previous revision
+
+### 10.3 Onboarding a new provider
+
+Add one YAML file under `config/providers/`, defining the file format,
+column mappings, and any provider-specific overrides. No code changes are
+required. For Glue, re-upload the `config/` directory to S3 after adding the
+file. For ECS, rebuild the image so the new config is baked in.
