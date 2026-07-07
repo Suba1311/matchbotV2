@@ -38,6 +38,6 @@ USER matchbot
 
 # The container's job is one orchestrated run. EventBridge/ECS passes the
 # provider + S3 input as the command, e.g.:
-#   matchbot run --provider provider2_unemployment --input s3://bucket/dropzone/
+#   matchbot run --provider ride_enrollment --input s3://bucket/dropzone/
 ENTRYPOINT ["matchbot"]
 CMD ["--help"]
