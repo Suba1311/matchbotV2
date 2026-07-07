@@ -43,7 +43,7 @@ def test_accept_when_strong() -> None:
     ]
     out = m.match(rec, cands)
     assert out.decision is MatchDecision.MATCHED
-    assert out.member_id == "M9"
+    assert out.idcol_id == "M9"
     assert out.score == 1.0
 
 

@@ -36,6 +36,7 @@ class InMemoryRepository(Repository):
     def __init__(self, members: list[dict[str, Any]] | None = None) -> None:
         self.members = members or []
         self.land: list[dict[str, Any]] = []
+        self.land_rejects: list[dict[str, Any]] = []
         self.stage: list[dict[str, Any]] = []
         self.stage_updates: list[dict[str, Any]] = []
         self.target: list[dict[str, Any]] = []
@@ -63,6 +64,12 @@ class InMemoryRepository(Repository):
         self.land.extend(dict(r) for r in rows)
         return len(rows)
 
+    def write_land_rejects(
+        self, *, pipeline_run_id: int, provider_code: str, rows: Sequence[Mapping[str, Any]],
+    ) -> int:
+        self.land_rejects.extend(dict(r) for r in rows)
+        return len(rows)
+
     def write_stage(
         self, pipeline_run_id: int, rows: Sequence[Mapping[str, Any]]
     ) -> list[int]:
@@ -76,6 +83,12 @@ class InMemoryRepository(Repository):
     def update_stage_matches(self, updates: Sequence[Mapping[str, Any]]) -> int:
         self.stage_updates.extend(dict(u) for u in updates)
         return len(updates)
+
+    def load_reference(self) -> list[dict[str, Any]]:
+        """Same backing list as load_member_universe — this test double has
+        no separate rilds_reference concept; the orchestrator now calls this
+        one, so the ``members`` fixture data must be reachable through it."""
+        return list(self.members)
 
     def load_member_universe(self) -> list[dict[str, Any]]:
         return list(self.members)

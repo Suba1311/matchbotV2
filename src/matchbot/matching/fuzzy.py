@@ -84,12 +84,12 @@ class FuzzyMatcher:
         if best is None:
             return NO_MATCH
 
-        member_id = _member_key(best)
+        idcol_id = _member_key(best)
         if best_score >= self.accept_threshold:
             return MatchOutcome(
                 MatchDecision.MATCHED,
                 MatchMethod.FUZZY,
-                member_id,
+                idcol_id,
                 round(best_score, 4),
                 f"{self.name}: fuzzy match score={best_score:.3f}",
             )
@@ -97,7 +97,7 @@ class FuzzyMatcher:
             return MatchOutcome(
                 MatchDecision.AMBIGUOUS,
                 MatchMethod.FUZZY,
-                member_id,
+                idcol_id,
                 round(best_score, 4),
                 f"{self.name}: needs review score={best_score:.3f}",
             )

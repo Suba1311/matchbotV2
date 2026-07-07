@@ -71,8 +71,8 @@ class ProviderConfig(_Strict):
     format: FileFormat
     file_glob: str = Field(description="Glob to select this provider's files.")
 
-    # Short agency/provider code and dataset name used in the DB (stage,
-    # pipeline_runs, land table name). Default to the provider_id halves so
+    # Short agency/provider code and dataset name used in the DB (rilds_stage,
+    # rilds_audit, land table name). Default to the provider_id halves so
     # existing providers need no change.
     provider_code: str = Field(
         default="",

@@ -197,6 +197,11 @@ def main() -> None:
         fs = runtime.filesystem()
         notifier = get_notifier(settings)
         with runtime.repository(settings) as repo:
+            # Idempotent: create_all()'s checkfirst=True skips anything that
+            # already exists (e.g. a pre-populated rilds_reference), so this
+            # is cheap and safe to call on every run — no separate init-db
+            # job needed before the first run against a fresh database.
+            repo.init_schema()
             orch = Orchestrator(config, settings, repo, fs, notifier)
             results = orch.run_provider(provider, input_uri)
 
