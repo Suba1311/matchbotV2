@@ -70,6 +70,12 @@ class RunMetrics:
     # informational — for notifications/reporting, not matching logic.
     matched_on: list[str] = field(default_factory=list)
 
+    # Size of rilds_reference at the time this run loaded it (via
+    # load_reference(), already fetched for blocking/matching regardless —
+    # this just records len(candidates), no extra query). Purely
+    # informational, like matched_on; not persisted to rilds_audit today.
+    reference_row_count: int = 0
+
     @property
     def duration_seconds(self) -> float:
         end = self.finished_at if self.finished_at is not None else time.time()

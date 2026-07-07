@@ -235,6 +235,7 @@ class Orchestrator:
         matchers = build_matchers(chosen, g.standardization)
         metrics.matched_on = matched_on_attributes(chosen)
         candidates = self._repo.load_reference()
+        metrics.reference_row_count = len(candidates)
         index = blocking.index_members(candidates, keys)
 
         # STAGE-row writes happen inline within this timed MATCH block (not

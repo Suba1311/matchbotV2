@@ -1,8 +1,8 @@
 """Amazon SES notifier (optional, ``[aws]`` extra).
 
 Emails an HTML run-summary table: status, provider, row counts, match rate,
-duration, and which attributes the matcher chain actually compared on.
-boto3 is imported lazily so the core never depends on it.
+reference table size, duration, and which attributes the matcher chain
+actually compared on. boto3 is imported lazily so the core never depends on it.
 """
 
 from __future__ import annotations
@@ -29,14 +29,18 @@ def _build_html(metrics: RunMetrics) -> str:
     m = metrics.to_dict()
     matched_on = ", ".join(metrics.matched_on) if metrics.matched_on else "—"
     rows = [
+        _row("Run ID", m["run_id"]),
         _row("Status", m["status"].upper()),
         _row("Provider", m["provider_id"]),
         _row("Source file", m["source_uri"]),
         _row("Matched on", matched_on),
+        _row("Rows in file", str(m["rows_received"])),
+        _row("Rows rejected", str(m["rows_rejected"])),
         _row("Rows staged", str(m["rows_staged"])),
         _row("Rows matched", str(m["rows_matched"])),
         _row("Rows unmatched", str(m["rows_unmatched"])),
         _row("Match rate", f"{m['match_rate']:.1%}"),
+        _row("Reference table rows", str(metrics.reference_row_count)),
         _row("Duration (s)", str(m["duration_seconds"])),
     ]
     if m["error"]:
@@ -58,14 +62,18 @@ def _build_text(metrics: RunMetrics) -> str:
     m = metrics.to_dict()
     matched_on = ", ".join(metrics.matched_on) if metrics.matched_on else "-"
     lines = [
+        f"Run ID: {m['run_id']}",
         f"Status: {m['status'].upper()}",
         f"Provider: {m['provider_id']}",
         f"Source file: {m['source_uri']}",
         f"Matched on: {matched_on}",
+        f"Rows in file: {m['rows_received']}",
+        f"Rows rejected: {m['rows_rejected']}",
         f"Rows staged: {m['rows_staged']}",
         f"Rows matched: {m['rows_matched']}",
         f"Rows unmatched: {m['rows_unmatched']}",
         f"Match rate: {m['match_rate']:.1%}",
+        f"Reference table rows: {metrics.reference_row_count}",
         f"Duration (s): {m['duration_seconds']}",
     ]
     if m["error"]:
