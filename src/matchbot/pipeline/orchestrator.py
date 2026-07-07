@@ -25,7 +25,12 @@ from matchbot.matching.base import build_matchers
 from matchbot.pipeline.base import PipelineContext
 from matchbot.pipeline.canonical import CanonicalStage
 from matchbot.pipeline.cleanse import CleanseStage
-from matchbot.pipeline.match import MatchStage, matched_on_attributes, resolve_matcher_chain
+from matchbot.pipeline.match import (
+    MatchStage,
+    filter_chain_by_provider_attributes,
+    matched_on_attributes,
+    resolve_matcher_chain,
+)
 from matchbot.pipeline.parse import ParseStage
 
 if TYPE_CHECKING:
@@ -220,6 +225,13 @@ class Orchestrator:
             chosen = resolve_matcher_chain(ctx.provider.matchers, g.matching.matchers)
         else:
             chosen = list(g.matching.matchers)
+        # Drop rules this provider's file structurally can't satisfy (e.g.
+        # RIDE never maps birth_date, so name+DOB / name+address rules would
+        # skip on every single record — filtering them out once here avoids
+        # that wasted work and keeps matched_on accurate to what can actually
+        # match, not the full theoretical chain regardless of relevance.
+        mapped_attributes = set(ctx.provider.column_mappings.values())
+        chosen = filter_chain_by_provider_attributes(chosen, mapped_attributes)
         matchers = build_matchers(chosen, g.standardization)
         metrics.matched_on = matched_on_attributes(chosen)
         candidates = self._repo.load_reference()

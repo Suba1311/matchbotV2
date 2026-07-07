@@ -87,8 +87,16 @@ class InMemoryRepository(Repository):
     def load_reference(self) -> list[dict[str, Any]]:
         """Same backing list as load_member_universe — this test double has
         no separate rilds_reference concept; the orchestrator now calls this
-        one, so the ``members`` fixture data must be reachable through it."""
-        return list(self.members)
+        one, so the ``members`` fixture data must be reachable through it.
+        Mirrors PostgresRepository.load_reference()'s sasid -> member_external_id
+        aliasing so fixtures shaped like real rilds_reference rows (sasid, not
+        member_external_id) work the same way here as in production."""
+        candidates = []
+        for m in self.members:
+            d = dict(m)
+            d.setdefault("member_external_id", d.get("sasid"))
+            candidates.append(d)
+        return candidates
 
     def load_member_universe(self) -> list[dict[str, Any]]:
         return list(self.members)
@@ -117,6 +125,25 @@ class InMemoryRepository(Repository):
 
 
 @pytest.fixture
+def ride_reference_rows() -> list[dict[str, Any]]:
+    """rilds_reference-shaped rows for RIDE (SASID-only) matching tests."""
+    return [
+        {
+            "idcol_id": 1,
+            "first_name": "MARY",
+            "last_name": "CONTRERAS",
+            "sasid": "1000049302",
+        },
+        {
+            "idcol_id": 2,
+            "first_name": "JOHN",
+            "last_name": "JONES",
+            "sasid": "1000160573",
+        },
+    ]
+
+
+@pytest.fixture
 def members() -> list[dict[str, Any]]:
     return [
         {
@@ -139,3 +166,8 @@ def members() -> list[dict[str, Any]]:
 @pytest.fixture
 def repo(members: list[dict[str, Any]]) -> InMemoryRepository:
     return InMemoryRepository(members=members)
+
+
+@pytest.fixture
+def ride_repo(ride_reference_rows: list[dict[str, Any]]) -> InMemoryRepository:
+    return InMemoryRepository(members=ride_reference_rows)
