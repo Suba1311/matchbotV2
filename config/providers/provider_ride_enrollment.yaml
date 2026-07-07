@@ -2,9 +2,12 @@
 # This file is the ENTIRE onboarding surface for this provider.
 #
 # Note: this source has NO SSN and NO DOB. The strong person key is SASID,
-# mapped to canonical `member_external_id`. Matching is SASID exact-match
-# only (see the `matchers:` override below) — no name/DOB fallback, since
-# SASID is the only attribute RIDE considers authoritative for identity.
+# mapped to canonical `member_external_id`. Matching uses the global default
+# chain (config/global.yaml) unmodified — no provider-level override needed:
+# every rule after deterministic_external_id requires ssn/birth_date/address1,
+# none of which RIDE maps, so those rules skip for every record here. Only
+# deterministic_external_id (SASID) ever actually applies to this provider's
+# data today.
 provider_id: ride_enrollment
 provider_code: ride
 dataset_name: enrollment
@@ -37,6 +40,5 @@ transforms:
 # used for matching, so it's not a gate for whether the row is processed.
 skip_if_null: [member_external_id]
 
-# Override the global matcher chain: SASID exact match only, no fallback.
-matchers:
-  - deterministic_external_id
+# No matchers: override — inherits the global default chain (see the note
+# above this file).

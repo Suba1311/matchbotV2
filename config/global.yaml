@@ -62,47 +62,38 @@ matching:
       attributes: [last_name]
       phonetic: [last_name]
 
-  # Ordered matcher chain. First matcher to ACCEPT wins. A record that no
-  # matcher accepts but some matcher marks reviewable -> AMBIGUOUS (ERROR
-  # table for optional review); otherwise UNMATCHED. No human gate.
+  # Ordered, all-exact-match cascade. First matcher to ACCEPT wins. Each
+  # matcher independently requires every one of its `keys` to be present and
+  # non-blank on the record — a record missing a rule's required field(s), or
+  # for which the rule finds no exact-equal candidate, falls through to the
+  # next rule in this list. No fuzzy matching, no confidence scoring: every
+  # match here is either an exact-equality accept (score 1.0) or nothing.
+  #
+  # A provider whose file structurally never has a given field (e.g. RIDE has
+  # no birth_date column at all) still lists this same global chain — no
+  # provider-level override needed. That rule's key lookup returns None for
+  # every record, so it's a fast, harmless skip for that provider's data,
+  # never a false accept.
   matchers:
-    # Strong provider-assigned id (e.g. RIDE SASID). Highest precedence.
+    # Strong provider-assigned id (e.g. RIDE SASID -> member_external_id via
+    # that provider's own column_mappings). Highest precedence.
     - name: deterministic_external_id
       type: deterministic
       keys: [member_external_id]
 
-    - name: deterministic_ssn_dob
+    - name: deterministic_ssn
       type: deterministic
-      keys: [ssn, birth_date]
+      keys: [ssn]
 
-    # Use standardized name columns so suffixes/prefixes (JR, SR, DR, etc.)
-    # are stripped before exact comparison.
+    # Standardized name columns (suffixes/prefixes like JR, SR, DR stripped)
+    # so exact comparison isn't defeated by formatting differences alone.
     - name: deterministic_name_dob
       type: deterministic
       keys: [first_name_std, last_name_std, birth_date]
 
-    # Fuzzy: compare standardized names so "SMITH JR" vs "SMITH" scores
-    # correctly instead of failing the per-field threshold.
-    - name: fuzzy_identity
-      type: fuzzy
-      accept_threshold: 0.88
-      review_threshold: 0.65
-      comparisons:
-        - { attribute: first_name_std, method: jaro_winkler, weight: 1.0, threshold: 0.90 }
-        - { attribute: last_name_std,  method: jaro_winkler, weight: 1.5, threshold: 0.90 }
-        - { attribute: birth_date,     method: exact,        weight: 2.0, threshold: 1.00 }
-        - { attribute: ssn,            method: exact,        weight: 2.5, threshold: 1.00 }
-
-    # Name-only fuzzy fallback for providers without SSN/DOB (e.g. RIDE).
-    # Conservative thresholds since name alone is weaker evidence.
-    - name: fuzzy_name
-      type: fuzzy
-      accept_threshold: 0.95
-      review_threshold: 0.80
-      comparisons:
-        - { attribute: first_name_std,  method: jaro_winkler, weight: 1.0, threshold: 0.92 }
-        - { attribute: last_name_std,   method: jaro_winkler, weight: 1.5, threshold: 0.92 }
-        - { attribute: middle_name,     method: jaro_winkler, weight: 0.5, threshold: 0.90 }
+    - name: deterministic_name_addr
+      type: deterministic
+      keys: [first_name_std, last_name_std, address1]
 
 # --- Data-quality rules (evaluated during cleanse; recorded as metrics) ------
 dq_rules:
