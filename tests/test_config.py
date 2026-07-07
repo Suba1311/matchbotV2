@@ -18,12 +18,7 @@ _CANON = [{"name": a.name, "dtype": a.dtype} for a in CANONICAL_ATTRIBUTES]
 
 
 def test_real_config_loads(app_config: AppConfig) -> None:
-    assert {
-        "provider1_education",
-        "provider2_unemployment",
-        "provider3_health",
-        "ride_enrollment",
-    } <= set(app_config.providers)
+    assert {"ride_enrollment"} <= set(app_config.providers)
     assert len(app_config.global_config.matching.matchers) >= 3
 
 

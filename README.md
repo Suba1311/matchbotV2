@@ -44,13 +44,14 @@ cp .env.example .env
 # 3. Create tables in the configured schema (idempotent)
 uv run matchbot init-db
 
-# 4. Generate synthetic sample data (no PII) and seed the Member Universe
-uv run python scripts/gen_synthetic_data.py
-uv run matchbot seed-members --csv data/samples/member_universe.csv
+# 4. Seed the reference table matching runs against (see
+#    docs/glue-implementation.md and scripts/seed_rilds_reference.py for how
+#    to (re)generate and load rilds_reference from a real RIDE extract).
+uv run python scripts/seed_rilds_reference.py
 
 # 5. Validate config and run the pipeline locally
 uv run matchbot validate-config
-uv run matchbot run --provider provider2_unemployment --input data/samples/
+uv run matchbot run --provider ride_enrollment --input data/samples/ride_enrollment_1k.csv
 ```
 
 Commands: `run`, `init-db`, `seed-members`, `validate-config`, `list-providers`.
@@ -94,12 +95,13 @@ src/matchbot/
   domain/                canonical schema, enums (pure, no deps)
   config/                Pydantic models, loader, env settings
   pipeline/              parse · cleanse · canonical · match stages + orchestrator
-  matching/              deterministic / fuzzy matchers, blocking, standardizers
+  matching/              deterministic (+ fuzzy, unused by default) matchers, blocking, standardizers
   storage/               repository interface + Postgres impl
   runtime/               local / fargate / glue / snowflake adapters
   audit/                 run metrics + audit persistence
   notify/                completion notifiers (log / SES)
-scripts/                 synthetic data generator
+scripts/                 Glue job entrypoint, ECS/Glue Lambda triggers,
+                         rilds_reference sample generation + seeding
 tests/                   unit + integration
 ```
 

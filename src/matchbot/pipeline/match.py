@@ -62,6 +62,53 @@ def resolve_matcher_chain(
     return resolved
 
 
+# Derived attribute -> the canonical (provider-mappable) attribute it's
+# computed from. Used only to resolve whether a matcher's key is actually
+# satisfiable for a given provider — e.g. "first_name_std" isn't itself a
+# column_mappings target, but it's derived from "first_name", so a rule
+# keyed on first_name_std IS usable whenever the provider maps first_name.
+_DERIVED_ATTRIBUTE_SOURCE: dict[str, str] = {
+    "first_name_std": "first_name",
+    "first_name_metaphone1": "first_name",
+    "last_name_std": "last_name",
+    "last_name_metaphone1": "last_name",
+    "last_name8": "last_name",
+    "birth_year": "birth_date",
+    "birth_month": "birth_date",
+    "birth_day": "birth_date",
+}
+
+
+def _source_attribute(attribute: str) -> str:
+    """The underlying canonical attribute a matcher key ultimately depends on."""
+    return _DERIVED_ATTRIBUTE_SOURCE.get(attribute, attribute)
+
+
+def filter_chain_by_provider_attributes(
+    matcher_chain: list[MatcherSpec], mapped_attributes: set[str]
+) -> list[MatcherSpec]:
+    """Drop matchers whose required attribute(s) this provider never maps.
+
+    A rule requiring ``birth_date`` (or a column derived from it, like
+    ``birth_year``) can never fire for a provider whose file structurally has
+    no DOB column (e.g. RIDE) — every record would return the same skip,
+    every run, forever. Filtering these out once, at chain-resolution time,
+    avoids that wasted work and keeps ``matched_on_attributes`` accurate: it
+    only ever sees rules this provider's data could plausibly satisfy, not
+    the full global chain regardless of relevance.
+
+    A rule survives only if every one of its keys/comparison-attributes
+    resolves (via ``_source_attribute``) to something in ``mapped_attributes``.
+    """
+    kept: list[MatcherSpec] = []
+    for spec in matcher_chain:
+        required = [_source_attribute(k) for k in spec.keys]
+        required += [_source_attribute(c.attribute) for c in spec.comparisons]
+        if required and all(attr in mapped_attributes for attr in required):
+            kept.append(spec)
+    return kept
+
+
 # Canonical attribute -> display name, for reporting (e.g. the email summary)
 # only — never used in matching logic itself. Falls back to a title-cased,
 # underscore-stripped version of the raw attribute for anything not listed
